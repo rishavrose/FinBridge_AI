@@ -674,15 +674,14 @@ function LookupPanel({ token, globalCfg, onAction }: LookupPanelProps) {
       // Resolve username → UUID if needed
       let resolvedId = userId.trim();
       const isUuid = /^[0-9a-f-]{36}$/.test(resolvedId);
+      const { users } = await listUsers(token);
       if (!isUuid) {
-        const { users } = await listUsers(token);
         const match = users.find(u => u.username.toLowerCase() === resolvedId.toLowerCase());
         if (!match) { setError(`User "${resolvedId}" not found`); return; }
         resolvedId = match.id;
       }
 
       const limits = await fetchAiUserLimits(resolvedId, token);
-      const { users } = await listUsers(token);
       const user = users.find(u => u.id === resolvedId);
       setRow({
         user_id:         resolvedId,
