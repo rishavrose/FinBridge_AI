@@ -1,0 +1,417 @@
+/**
+ * AI Chat Route — Memory-Augmented Chat Endpoint
+ *
+ * POST /ai/chat/message
+ *
+ * This is an ADDITIVE route. It does not modify the existing
+ * /chat/conversations endpoints or the MCP SSE interface.
+ *
+ * Flow:
+ *   1. Authenticate caller
+ *   2. Validate request body
+ *   3. Optionally create/resolve conversation
+ *   4. Save user message to chat_messages (same table as existing chat)
+ *   5. Run AI Memory pipeline (normalise → Redis → Qdrant)
+ *   6. If cache HIT  → return cached/learned response immediately
+ *   7. If cache MISS → call chatWithTools() (existing OpenAI + MCP pipeline)
+ *   8. Save AI response to chat_messages
+ *   9. Queue async learning job (BullMQ)
+ *  10. Record analytics (non-blocking)
+ *  11. Return response with cache metadata
+ *
+ * GET /ai/chat/stats
+ *   Returns in-memory cache performance counters (no auth required in dev).
+ */
+
+import type { FastifyInstance } from 'fastify';
+import { v4 as uuidv4 } from 'uuid';
+
+import { authenticateRequest } from '../../middleware/auth.js';
+import { executeSelect, executeWrite } from '../../database/client.js';
+import { chatWithTools, isPlaceholderResponse } from '../../openai/converter.js';
+import type { ToolCallTrace } from '../../openai/converter.js';
+import { queryMemory, buildLearningPayload, formatValidatedResponse } from '../../ai/memory/index.js';
+import { enqueueLearning } from '../../ai/workers/index.js';
+import { recordCacheLog, recordChatHistory, getCacheStats } from '../../ai/analytics/index.js';
+import { logger } from '../../utils/logger.js';
+import type { Role } from '../../types/index.js';
+
+// ─── Request / Response types ─────────────────────────────────────────────────
+
+interface AiChatBody {
+  message: string;
+  conversationId?: string;
+  systemPrompt?: string;
+}
+
+interface ConversationRow {
+  id: string;
+  user_id: string;
+  title: string;
+}
+
+// ─── Route registration ────────────────────────────────────────────────────────
+
+export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
+  // ── POST /ai/chat/message ─────────────────────────────────────────────────
+
+  fastify.post<{ Body: AiChatBody }>('/ai/chat/message', {
+    schema: {
+      tags: ['AI'],
+      summary: 'Memory-augmented AI chat message',
+      description:
+        'Sends a message through the AI Memory pipeline. ' +
+        'Cached responses skip OpenAI entirely. ' +
+        'New responses are learned asynchronously for future reuse.',
+      body: {
+        type: 'object',
+        required: ['message'],
+        properties: {
+          message: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 4096,
+            description: 'The user question or command',
+          },
+          conversationId: {
+            type: 'string',
+            description: 'Existing conversation UUID. Omit to start a new conversation.',
+          },
+          systemPrompt: {
+            type: 'string',
+            maxLength: 8192,
+            description: 'Optional custom system prompt override',
+          },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            reply: { type: 'string' },
+            conversationId: { type: 'string' },
+            messageId: { type: 'string' },
+            cached: { type: 'boolean' },
+            cacheSource: { type: 'string', enum: ['redis', 'qdrant', 'openai'] },
+            confidence: { type: 'number' },
+            responseType: { type: 'string', enum: ['direct', 'validated', 'miss'] },
+            responseMs: { type: 'number' },
+            toolCallsExecuted: { type: 'number' },
+            toolCallsTrace: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  args: { type: 'object' },
+                },
+              },
+            },
+          },
+        },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [authenticateRequest],
+  }, async (request, reply) => {
+    const startMs = Date.now();
+    const { message, conversationId: inputConversationId, systemPrompt } = request.body;
+    const userId = request.user.id;
+    const callerRole = request.user.role as Role;
+
+    // ── 1. Resolve or create conversation ────────────────────────────────────
+    let conversationId = inputConversationId ?? null;
+
+    if (conversationId) {
+      // Verify the conversation belongs to this user
+      const [conv] = await executeSelect<ConversationRow>(
+        'SELECT id FROM chat_conversations WHERE id = ? AND user_id = ?',
+        [conversationId, userId],
+      );
+      if (!conv) {
+        return reply.status(404).send({ error: 'Conversation not found', code: 'NOT_FOUND' });
+      }
+    } else {
+      // Auto-create a new conversation with the message as the title
+      conversationId = uuidv4();
+      const title = message.slice(0, 100);
+      await executeWrite(
+        'INSERT INTO chat_conversations (id, user_id, title) VALUES (?, ?, ?)',
+        [conversationId, userId, title],
+      );
+    }
+
+    // ── 2. Save the user message ──────────────────────────────────────────────
+    const userMessageId = uuidv4();
+    await executeWrite(
+      'INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
+      [userMessageId, conversationId, 'user', message],
+    );
+
+    // ── 3. AI Memory lookup ───────────────────────────────────────────────────
+    const memoryResult = await queryMemory(message);
+
+    let reply_text: string;
+    let toolCallsExecuted = 0;
+    let toolCallsTrace: ToolCallTrace[] = [];
+    let cacheSource: 'redis' | 'qdrant' | 'openai' = 'openai';
+
+    const cachedResponse = memoryResult.hit && memoryResult.response
+      ? (memoryResult.responseType === 'validated'
+          ? formatValidatedResponse(memoryResult.response, memoryResult.confidence ?? 0)
+          : memoryResult.response)
+      : null;
+    const cacheHitValid = cachedResponse !== null && !isPlaceholderResponse(cachedResponse);
+
+    if (cacheHitValid && cachedResponse) {
+      // ── Cache HIT ──────────────────────────────────────────────────────────
+      cacheSource = memoryResult.source as 'redis' | 'qdrant';
+      reply_text = cachedResponse;
+
+      logger.info(
+        {
+          userId,
+          source: cacheSource,
+          confidence: memoryResult.confidence,
+          responseType: memoryResult.responseType,
+          ms: Date.now() - startMs,
+        },
+        'AI chat: cache HIT — skipping OpenAI',
+      );
+    } else {
+      // ── Cache MISS — call OpenAI + MCP tools ───────────────────────────────
+      logger.info({ userId, intent: memoryResult.intentCategory }, 'AI chat: cache MISS — calling OpenAI');
+
+      const chatResult = await chatWithTools({
+        userMessage: message,
+        systemPrompt,
+        callerId: userId,
+        callerRole,
+        callerName: request.user.name,
+      });
+
+      reply_text = chatResult.reply;
+      toolCallsExecuted = chatResult.toolCallsExecuted;
+      toolCallsTrace = chatResult.toolCallsTrace;
+      cacheSource = 'openai';
+
+      // Structured query audit log — used for customer behavior analysis
+      if (toolCallsTrace.length > 0) {
+        logger.info({
+          event: 'ai.query_log',
+          userId,
+          conversationId,
+          tools: toolCallsTrace.map(t => ({
+            tool: t.name,
+            args: t.args,
+          })),
+          toolCount: toolCallsExecuted,
+          responseMs: Date.now() - startMs,
+        }, 'AI tool queries executed');
+      }
+
+      // ── Queue async learning (non-blocking) ────────────────────────────────
+      // Skip learning for empty-result responses so "No records found" answers
+      // never pollute the cache and replay on future queries that have real data.
+      const isEmptyResult =
+        reply_text.toLowerCase().includes('no records found') ||
+        reply_text.toLowerCase().includes('no data found') ||
+        reply_text.toLowerCase().includes('no results found') ||
+        reply_text.toLowerCase().includes('no matching records') ||
+        reply_text.toLowerCase().includes('0 records');
+
+      if (!isEmptyResult && !isPlaceholderResponse(reply_text)) {
+        const learningPayload = buildLearningPayload({
+          originalPrompt: message,
+          response: reply_text,
+          userId,
+          toolCallsCount: toolCallsExecuted,
+          memoryResult,
+        });
+
+        enqueueLearning(learningPayload).catch((e: unknown) =>
+          logger.warn({ err: e }, 'enqueueLearning failed'),
+        );
+      } else {
+        logger.info(
+          { userId, intent: memoryResult.intentCategory },
+          'AI chat: skipping learning enqueue — response was empty result',
+        );
+      }
+    }
+
+    const responseMs = Date.now() - startMs;
+
+    // ── 4. Save AI response to chat_messages ──────────────────────────────────
+    const assistantMessageId = uuidv4();
+    await executeWrite(
+      'INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
+      [assistantMessageId, conversationId, 'assistant', reply_text],
+    );
+
+    // ── 5. Update conversation timestamp ─────────────────────────────────────
+    await executeWrite(
+      'UPDATE chat_conversations SET updated_at = NOW() WHERE id = ?',
+      [conversationId],
+    );
+
+    // ── 6. Record analytics (fire-and-forget) ─────────────────────────────────
+    recordCacheLog({
+      promptHash: memoryResult.promptHash,
+      cacheSource,
+      hit: cacheHitValid,
+      confidence: memoryResult.confidence,
+      responseMs,
+    }).catch(() => {});
+
+    recordChatHistory({
+      userId,
+      conversationId,
+      originalPrompt: message,
+      normalizedPrompt: memoryResult.normalizedPrompt,
+      promptHash: memoryResult.promptHash,
+      response: reply_text,
+      cacheHit: cacheHitValid,
+      cacheSource,
+      confidenceScore: memoryResult.confidence ?? null,
+      responseMs,
+      toolCallsCount: toolCallsExecuted,
+    }).catch(() => {});
+
+    return reply.status(200).send({
+      reply: reply_text,
+      conversationId,
+      messageId: assistantMessageId,
+      cached: cacheHitValid,
+      cacheSource,
+      confidence: memoryResult.confidence,
+      responseType: memoryResult.responseType,
+      responseMs,
+      toolCallsExecuted,
+      toolCallsTrace,
+    });
+  });
+
+  // ── GET /ai/chat/stats ────────────────────────────────────────────────────
+
+  fastify.get('/ai/chat/stats', {
+    schema: {
+      tags: ['AI'],
+      summary: 'AI Memory cache performance statistics',
+      description: 'Returns in-memory counters for cache hits, miss rates, and average latency.',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [authenticateRequest],
+  }, async () => {
+    return getCacheStats();
+  });
+
+  // ── GET /ai/memory/knowledge ──────────────────────────────────────────────
+
+  fastify.get<{ Querystring: { limit?: string } }>('/ai/memory/knowledge', {
+    schema: {
+      tags: ['AI'],
+      summary: 'List learned knowledge entries',
+      querystring: {
+        type: 'object',
+        properties: { limit: { type: 'string' } },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [authenticateRequest],
+  }, async (request, reply) => {
+    const limit = Math.min(parseInt(request.query.limit ?? '50', 10) || 50, 200);
+    const rows = await executeSelect(
+      `SELECT id, original_prompt, normalized_prompt, intent_category, hit_count, confidence, created_at, updated_at
+       FROM ai_knowledge
+       ORDER BY hit_count DESC
+       LIMIT ?`,
+      [limit],
+    );
+    return reply.status(200).send({ rows });
+  });
+
+  // ── GET /ai/memory/history ────────────────────────────────────────────────
+
+  fastify.get<{ Querystring: { limit?: string } }>('/ai/memory/history', {
+    schema: {
+      tags: ['AI'],
+      summary: 'List AI chat history entries',
+      querystring: {
+        type: 'object',
+        properties: { limit: { type: 'string' } },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [authenticateRequest],
+  }, async (request, reply) => {
+    const limit = Math.min(parseInt(request.query.limit ?? '100', 10) || 100, 500);
+    const rows = await executeSelect(
+      `SELECT id, user_id, original_prompt, cache_hit, cache_source, confidence_score, response_ms, tool_calls_count, created_at
+       FROM ai_chat_history
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [limit],
+    );
+    return reply.status(200).send({ rows });
+  });
+
+  // ── GET /ai/memory/cache-logs ─────────────────────────────────────────────
+
+  fastify.get<{ Querystring: { limit?: string } }>('/ai/memory/cache-logs', {
+    schema: {
+      tags: ['AI'],
+      summary: 'List AI cache log entries',
+      querystring: {
+        type: 'object',
+        properties: { limit: { type: 'string' } },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [authenticateRequest],
+  }, async (request, reply) => {
+    const limit = Math.min(parseInt(request.query.limit ?? '200', 10) || 200, 1000);
+    const rows = await executeSelect(
+      `SELECT id, prompt_hash, cache_source, hit, confidence, response_ms, created_at
+       FROM ai_cache_logs
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [limit],
+    );
+    return reply.status(200).send({ rows });
+  });
+
+  // ── POST /ai/chat/feedback ────────────────────────────────────────────────
+
+  fastify.post<{
+    Body: { messageId: string; rating: number; feedbackType: 'positive' | 'negative' | 'neutral'; comment?: string };
+  }>('/ai/chat/feedback', {
+    schema: {
+      tags: ['AI'],
+      summary: 'Submit feedback on an AI response',
+      body: {
+        type: 'object',
+        required: ['messageId', 'rating', 'feedbackType'],
+        properties: {
+          messageId: { type: 'string' },
+          rating: { type: 'number', minimum: 1, maximum: 5 },
+          feedbackType: { type: 'string', enum: ['positive', 'negative', 'neutral'] },
+          comment: { type: 'string', maxLength: 1000 },
+        },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [authenticateRequest],
+  }, async (request, reply) => {
+    const { messageId, rating, feedbackType, comment } = request.body;
+    const userId = request.user.id;
+
+    await executeWrite(
+      `INSERT INTO ai_feedback (id, chat_history_id, user_id, rating, feedback_type, comment)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), messageId, userId, rating, feedbackType, comment ?? null],
+    );
+
+    return reply.status(201).send({ success: true });
+  });
+}

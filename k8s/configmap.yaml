@@ -1,0 +1,57 @@
+##############################################################################
+# Kubernetes — ConfigMap (non-sensitive config)
+##############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finbridge-mcp-config
+  namespace: finbridge
+data:
+  NODE_ENV: production
+  PORT: "3000"
+  HOST: "0.0.0.0"
+  DB_PORT: "3306"
+  DB_CONNECTION_LIMIT: "10"
+  DB_WAIT_FOR_CONNECTIONS: "true"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_KEY_PREFIX: "finbridge:"
+  JWT_EXPIRES_IN: "24h"
+  JWT_ISSUER: "finbridge-mcp"
+  OPENAI_MODEL: "gpt-4-turbo-preview"
+  OPENAI_MAX_TOKENS: "4096"
+  CACHE_TTL_DEFAULT: "300"
+  CACHE_TTL_SCHEMA: "3600"
+  CACHE_TTL_BALANCE: "60"
+  CACHE_TTL_TRANSACTIONS: "120"
+  RATE_LIMIT_MAX: "100"
+  RATE_LIMIT_WINDOW_MS: "60000"
+  LOG_LEVEL: "info"
+  LOG_PRETTY: "false"
+  MCP_SERVER_NAME: "finbridge-mcp"
+  MCP_SERVER_VERSION: "1.0.0"
+  QUEUE_CONCURRENCY: "5"
+  QUEUE_ATTEMPTS: "3"
+  QUEUE_BACKOFF_MS: "2000"
+---
+##############################################################################
+# Kubernetes — Secret template (replace base64 values before applying)
+##############################################################################
+apiVersion: v1
+kind: Secret
+metadata:
+  name: finbridge-mcp-secrets
+  namespace: finbridge
+type: Opaque
+data:
+  # echo -n "value" | base64
+  DB_HOST:         bXlzcWw=         # mysql
+  DB_NAME:         ZmluYnJpZGdlX2Ri # finbridge_db
+  DB_USER:         ZmluYnJpZGdlX3Jv # finbridge_readonly
+  DB_PASSWORD:     Y2hhbmdlbWU=     # changeme — REPLACE BEFORE DEPLOYING
+  REDIS_HOST:      cmVkaXM=         # redis
+  REDIS_PASSWORD:  ""
+  JWT_SECRET:      Y2hhbmdlX21lX3RvX2FfdmVyeV9sb25nX3JhbmRvbV9zZWNyZXRfYXRfbGVhc3RfMzJfY2hhcnM=
+  API_KEY_SALT:    Y2hhbmdlX21lXzE2Y2g=
+  OPENAI_API_KEY:  ""
+  BOOTSTRAP_SECRET: Y2hhbmdlbWU=

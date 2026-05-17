@@ -1,0 +1,171 @@
+##############################################################################
+# FinBridge MCP Server — Development Docker Compose
+# Usage: docker compose -f docker/docker-compose.yml up -d
+##############################################################################
+
+version: "3.9"
+
+services:
+  # ── Application ────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: finbridge-mcp:dev
+    container_name: finbridge-mcp-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      HOST: 0.0.0.0
+      # Database
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-finbridge_db}
+      DB_USER: ${DB_USER:-finbridge_readonly}
+      DB_PASSWORD: ${DB_PASSWORD:-password}
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # Auth — override in production
+      JWT_SECRET: ${JWT_SECRET:-dev_secret_change_in_prod_at_least_32_chars}
+      API_KEY_SALT: ${API_KEY_SALT:-dev_salt_16chars}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-dev_credential_enc_key_32chars!!}
+      # OpenAI
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4-turbo-preview}
+      OPENAI_MAX_TOKENS: ${OPENAI_MAX_TOKENS:-4096}
+      # Qdrant Vector DB
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-finbridge_ai_knowledge}
+      # AI Memory / Semantic Cache
+      AI_MEMORY_ENABLED: ${AI_MEMORY_ENABLED:-false}
+      AI_MEMORY_SIMILARITY_THRESHOLD: ${AI_MEMORY_SIMILARITY_THRESHOLD:-0.85}
+      AI_MEMORY_DIRECT_THRESHOLD: ${AI_MEMORY_DIRECT_THRESHOLD:-0.95}
+      AI_MEMORY_CACHE_TTL: ${AI_MEMORY_CACHE_TTL:-3600}
+      AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-text-embedding-3-small}
+      AI_EMBEDDING_DIMENSIONS: ${AI_EMBEDDING_DIMENSIONS:-1536}
+      # Logging
+      LOG_LEVEL: debug
+      LOG_PRETTY: "true"
+      # Bootstrap
+      BOOTSTRAP_SECRET: ${BOOTSTRAP_SECRET:-dev_bootstrap}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - ../logs:/app/logs
+    networks:
+      - finbridge-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── MySQL ──────────────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: finbridge-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-finbridge_db}
+      MYSQL_USER: ${DB_USER:-finbridge_readonly}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-password}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - finbridge-net
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "--password=${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: finbridge-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --loglevel notice
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - finbridge-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Qdrant Vector DB ───────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: finbridge-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - finbridge-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis UI (dev only) ────────────────────────────────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: finbridge-redis-ui
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: "local:redis:6379"
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - finbridge-net
+    profiles:
+      - tools
+
+# ── Networks & Volumes ────────────────────────────────────────────────────────
+networks:
+  finbridge-net:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  redis-data:
+  qdrant-data:

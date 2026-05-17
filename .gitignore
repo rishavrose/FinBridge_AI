@@ -1,0 +1,10 @@
+node_modules/
+dist/
+logs/
+.env
+.env.local
+*.log
+*.jpe
+*.jpg
+*.png
+.DS_Store

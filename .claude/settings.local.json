@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(chmod +x /Users/rishavsingh/Desktop/\"FinBridge AI\"/DEPLOY_FIX.sh)",
+      "Bash(docker exec *)",
+      "Bash(docker build *)",
+      "Bash(npx tsc *)",
+      "Bash(docker compose *)",
+      "Bash(npm install *)",
+      "Bash(curl -s -X POST http://localhost:3000/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"admin123\"}')",
+      "Bash(python3 -m json.tool)"
+    ]
+  }
+}
