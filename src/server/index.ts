@@ -74,10 +74,15 @@ export async function buildServer() {
   });
 
   // ── CORS ───────────────────────────────────────────────────────────────────
+  const allowedOrigins = env.CORS_ORIGINS
+    ? env.CORS_ORIGINS.split(',').map(o => o.trim())
+    : true;
+
   await fastify.register(cors, {
-    origin: env.NODE_ENV === 'production' ? false : true,
-    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+    origin: allowedOrigins,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-Id'],
+    credentials: true,
   });
 
   // ── Rate Limiting ──────────────────────────────────────────────────────────
