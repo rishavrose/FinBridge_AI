@@ -98,7 +98,10 @@ export async function executeSelect<T = Record<string, unknown>>(
  * chat_conversations and chat_messages tables.
  * All other write attempts are rejected at the application level.
  */
-const ALLOWED_WRITE_TABLES = ['chat_conversations', 'chat_messages', 'app_users'];
+const ALLOWED_WRITE_TABLES = [
+  'chat_conversations', 'chat_messages', 'app_users',
+  'ai_chat_history', 'ai_knowledge', 'ai_feedback', 'ai_cache_logs', 'ai_embeddings',
+];
 
 export async function executeWrite(
   sql: string,
