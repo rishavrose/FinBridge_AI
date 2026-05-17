@@ -395,7 +395,6 @@ export async function chatWithTools(
           const summaryResp = await client.chat.completions.create({
             model: env.OPENAI_MODEL,
             messages,
-            tool_choice: 'none',
             max_completion_tokens: env.OPENAI_MAX_TOKENS,
           });
           reply = summaryResp.choices[0]?.message?.content ?? '';
