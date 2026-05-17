@@ -243,15 +243,65 @@ CREATE TABLE IF NOT EXISTS ai_embeddings (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='Embedding metadata linking knowledge rows to Qdrant point IDs';
 
+-- ── AI Rate Limiting ──────────────────────────────────────────────────────────
+
+-- Global AI rate limiting configuration (single-row, admin-controlled at runtime)
+CREATE TABLE IF NOT EXISTS ai_rate_config (
+  id            INT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  ai_enabled    TINYINT(1)   NOT NULL DEFAULT 1   COMMENT 'Kill-switch: 0 disables AI for all users',
+  hourly_limit  INT          NOT NULL DEFAULT 100  COMMENT 'Max AI requests per user per hour (global default)',
+  daily_limit   INT          NOT NULL DEFAULT 1000 COMMENT 'Max AI requests per user per day (global default)',
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by    VARCHAR(36)  NULL     COMMENT 'Admin user_id who last changed this'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='Global AI rate limiting configuration';
+
+-- Per-user AI rate limit overrides
+CREATE TABLE IF NOT EXISTS ai_user_limits (
+  id              INT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id         VARCHAR(36)  NOT NULL,
+  is_blocked      TINYINT(1)   NOT NULL DEFAULT 0  COMMENT '1 = user cannot make AI requests',
+  is_unlimited    TINYINT(1)   NOT NULL DEFAULT 0  COMMENT '1 = premium/enterprise, no rate limits',
+  hourly_limit    INT          NULL                 COMMENT 'Override hourly limit; NULL = use global',
+  daily_limit     INT          NULL                 COMMENT 'Override daily limit; NULL = use global',
+  plan_type       VARCHAR(50)  NOT NULL DEFAULT 'standard' COMMENT 'standard | premium | enterprise',
+  block_reason    TEXT         NULL,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by      VARCHAR(36)  NULL,
+  UNIQUE KEY uq_aul_user_id  (user_id),
+  INDEX idx_aul_is_blocked   (is_blocked)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='Per-user AI rate limit overrides (blocks, unlimited plans, custom quotas)';
+
+-- Per-user cumulative AI usage statistics (Redis holds current window; this is historical)
+CREATE TABLE IF NOT EXISTS ai_usage_stats (
+  id               INT            NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id          VARCHAR(36)    NOT NULL,
+  total_requests   BIGINT         NOT NULL DEFAULT 0 COMMENT 'Lifetime total AI requests',
+  last_request_at  DATETIME       NULL,
+  created_at       DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_aus_user_id        (user_id),
+  INDEX idx_aus_last_request_at    (last_request_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='Per-user cumulative AI usage statistics';
+
 -- Grant the app user write access to all AI tables
 GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_knowledge     TO 'finbridge_readonly'@'%';
 GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_chat_history  TO 'finbridge_readonly'@'%';
 GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_feedback      TO 'finbridge_readonly'@'%';
 GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_cache_logs    TO 'finbridge_readonly'@'%';
 GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_embeddings    TO 'finbridge_readonly'@'%';
+GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_rate_config   TO 'finbridge_readonly'@'%';
+GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_user_limits   TO 'finbridge_readonly'@'%';
+GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_usage_stats   TO 'finbridge_readonly'@'%';
 FLUSH PRIVILEGES;
 
 -- ── Seed data ──────────────────────────────────────────────────────────────────
+
+-- Seed default global rate limit config (single row, id=1)
+INSERT IGNORE INTO ai_rate_config (id, ai_enabled, hourly_limit, daily_limit) VALUES (1, 1, 100, 1000);
 
 INSERT IGNORE INTO bank_health (bank_code, bank_name, status, success_rate_24h, avg_response_ms, total_requests_24h, failed_requests_24h) VALUES
   ('GTB',     'Guaranty Trust Bank',   'operational', 99.87, 312,  45820, 60),

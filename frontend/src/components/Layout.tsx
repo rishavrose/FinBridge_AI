@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { JwtClaims } from '../types';
 
-type Page = 'dashboard' | 'chat' | 'tools' | 'mcp' | 'keys' | 'db' | 'ai-memory' | 'analytics' | 'users';
+type Page = 'dashboard' | 'chat' | 'tools' | 'mcp' | 'keys' | 'db' | 'ai-memory' | 'analytics' | 'users' | 'ai-rate-limit';
 
 interface LayoutProps {
   claims: JwtClaims;
@@ -96,6 +96,17 @@ const NAV_ITEMS: { id: Page; label: string; icon: React.ReactNode; adminOnly?: b
     ),
   },
   {
+    id: 'ai-rate-limit',
+    label: 'Rate Limiting',
+    adminOnly: true,
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+          d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+    ),
+  },
+  {
     id: 'analytics',
     label: 'Analytics',
     icon: (
@@ -181,7 +192,8 @@ export function Layout({ claims, activePage, onNavigate, onLogout, children }: L
       {/* User / Logout */}
       <div className="px-3 py-4 border-t border-[#EBEBEB] flex-shrink-0">
         <div className="px-3 py-2 mb-2">
-          <div className="text-xs font-medium text-[#404040] truncate">{claims.sub}</div>
+          <div className="text-sm font-semibold text-[#1a1a2e] truncate">{claims.name ?? claims.sub}</div>
+          <div className="text-[11px] text-gray-400 font-mono truncate mt-0.5">{claims.sub.slice(0, 8)}…</div>
           <span className={`inline-block mt-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${ROLE_COLORS[claims.role] ?? ROLE_COLORS.readonly}`}>
             {claims.role}
           </span>

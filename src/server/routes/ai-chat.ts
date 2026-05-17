@@ -27,6 +27,7 @@ import type { FastifyInstance } from 'fastify';
 import { v4 as uuidv4 } from 'uuid';
 
 import { authenticateRequest } from '../../middleware/auth.js';
+import { checkAiRateLimit } from '../../middleware/ai-rate-limit.js';
 import { executeSelect, executeWrite } from '../../database/client.js';
 import { chatWithTools, isPlaceholderResponse } from '../../openai/converter.js';
 import type { ToolCallTrace } from '../../openai/converter.js';
@@ -112,7 +113,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       },
       security: [{ bearerAuth: [] }],
     },
-    preHandler: [authenticateRequest],
+    preHandler: [authenticateRequest, checkAiRateLimit],
   }, async (request, reply) => {
     const startMs = Date.now();
     const { message, conversationId: inputConversationId, systemPrompt } = request.body;

@@ -501,3 +501,100 @@ export async function fetchAiCacheLogs(token: string, limit = 200): Promise<AiCa
   ).catch(() => null);
   return res?.rows ?? [];
 }
+
+// ─── AI Rate Limiting (admin only) ───────────────────────────────────────────
+
+export interface AiRateConfig {
+  aiEnabled: boolean;
+  hourlyLimit: number;
+  dailyLimit: number;
+}
+
+export interface AiUserLimits {
+  userId: string;
+  isBlocked: boolean;
+  isUnlimited: boolean;
+  hourlyLimit: number | null;
+  dailyLimit: number | null;
+  planType: string;
+  blockReason: string | null;
+  note?: string;
+}
+
+export interface AiUsageRow {
+  user_id: string;
+  username: string;
+  full_name: string | null;
+  total_requests: number;
+  last_request_at: string | null;
+  hourlyCount: number;
+  dailyCount: number;
+  plan_type: string;
+  is_blocked: number;
+  is_unlimited: number;
+}
+
+export async function fetchAiRateConfig(token: string): Promise<AiRateConfig> {
+  return apiFetch<AiRateConfig>('/admin/ai/config', {}, token);
+}
+
+export async function updateAiRateConfig(
+  patch: Partial<AiRateConfig>,
+  token: string,
+): Promise<AiRateConfig & { success: boolean }> {
+  return apiFetch<AiRateConfig & { success: boolean }>('/admin/ai/config', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  }, token);
+}
+
+export async function fetchAiUserLimits(userId: string, token: string): Promise<AiUserLimits> {
+  return apiFetch<AiUserLimits>(`/admin/ai/users/${encodeURIComponent(userId)}/limits`, {}, token);
+}
+
+export async function updateAiUserLimits(
+  userId: string,
+  patch: Partial<Omit<AiUserLimits, 'userId' | 'note'>>,
+  token: string,
+): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>(
+    `/admin/ai/users/${encodeURIComponent(userId)}/limits`,
+    { method: 'PUT', body: JSON.stringify(patch) },
+    token,
+  );
+}
+
+export async function blockAiUser(userId: string, reason: string, token: string): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>(
+    `/admin/ai/users/${encodeURIComponent(userId)}/block`,
+    { method: 'POST', body: JSON.stringify({ reason }) },
+    token,
+  );
+}
+
+export async function unblockAiUser(userId: string, token: string): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>(
+    `/admin/ai/users/${encodeURIComponent(userId)}/unblock`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export async function resetAiUserCounters(userId: string, token: string): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>(
+    `/admin/ai/users/${encodeURIComponent(userId)}/reset`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export async function fetchAiUsageAnalytics(
+  token: string,
+  limit = 50,
+): Promise<{ rows: AiUsageRow[]; count: number }> {
+  return apiFetch<{ rows: AiUsageRow[]; count: number }>(
+    `/admin/ai/usage?limit=${limit}`,
+    {},
+    token,
+  );
+}

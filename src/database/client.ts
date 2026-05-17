@@ -101,6 +101,7 @@ export async function executeSelect<T = Record<string, unknown>>(
 const ALLOWED_WRITE_TABLES = [
   'chat_conversations', 'chat_messages', 'app_users',
   'ai_chat_history', 'ai_knowledge', 'ai_feedback', 'ai_cache_logs', 'ai_embeddings',
+  'ai_rate_config', 'ai_user_limits', 'ai_usage_stats',
 ];
 
 export async function executeWrite(

@@ -43,6 +43,7 @@ import { dbRoutes } from './routes/db.js';
 import { aiChatRoutes } from './routes/ai-chat.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { alertRoutes } from './routes/alerts.js';
+import { aiRateLimitRoutes } from './routes/ai-rate-limit.js';
 
 // ─── Build server ─────────────────────────────────────────────────────────────
 
@@ -123,6 +124,7 @@ export async function buildServer() {
         { name: 'MCP', description: 'Model Context Protocol SSE endpoints' },
         { name: 'AI', description: 'OpenAI function-calling chat interface' },
         { name: 'Database', description: 'Dynamic database connection management' },
+        { name: 'Admin', description: 'Admin controls for AI rate limiting and usage management' },
       ],
     },
   });
@@ -165,6 +167,7 @@ export async function buildServer() {
   await fastify.register(aiChatRoutes);
   await fastify.register(analyticsRoutes);
   await fastify.register(alertRoutes);
+  await fastify.register(aiRateLimitRoutes);
 
   return fastify;
 }

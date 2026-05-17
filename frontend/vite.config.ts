@@ -17,6 +17,7 @@ export default defineConfig({
       '/analytics': 'http://localhost:3000',
       '/alerts':    'http://localhost:3000',
       '/incidents': 'http://localhost:3000',
+      '/admin':     'http://localhost:3000',
     },
   },
 });

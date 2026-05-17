@@ -9,7 +9,8 @@
       "Bash(docker compose *)",
       "Bash(npm install *)",
       "Bash(curl -s -X POST http://localhost:3000/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"admin123\"}')",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" 'http://localhost:3000/admin/ai/config' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4N2NlZTdkZC0zODZiLTQyODEtOGVlNS01ZTU5MDJiYzI0ZmYiLCJyb2xlIjoiYWRtaW4iLCJuYW1lIjoiQWRtaW5pc3RyYXRvciIsImlhdCI6MTc3OTAxNzM0OSwiZXhwIjoxNzc5MTAzNzQ5LCJpc3MiOiJmaW5icmlkZ2UtbWNwIn0.TkqGYS_Bq21ACDJ7HXQZheZ03MxJg4PQafnN_Wgf8jM')"
     ]
   }
 }
