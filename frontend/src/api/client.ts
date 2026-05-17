@@ -19,6 +19,8 @@ import type {
 
 // ─── Base fetch helper ────────────────────────────────────────────────────────
 
+const API_BASE = ((import.meta as any).env?.VITE_API_URL as string | undefined) ?? '';
+
 async function apiFetch<T>(
   path: string,
   options: RequestInit = {},
@@ -35,7 +37,7 @@ async function apiFetch<T>(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(path, { ...options, headers });
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
