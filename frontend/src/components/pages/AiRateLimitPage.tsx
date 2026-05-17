@@ -8,6 +8,7 @@ import {
   unblockAiUser,
   resetAiUserCounters,
   fetchAiUsageAnalytics,
+  listUsers,
 } from '../../api/client';
 import type { AiRateConfig, AiUserLimits, AiUsageRow } from '../../api/client';
 
@@ -670,11 +671,23 @@ function LookupPanel({ token, globalCfg, onAction }: LookupPanelProps) {
     if (!userId.trim()) return;
     setLoading(true); setError(null); setRow(null);
     try {
-      const limits = await fetchAiUserLimits(userId.trim(), token);
+      // Resolve username → UUID if needed
+      let resolvedId = userId.trim();
+      const isUuid = /^[0-9a-f-]{36}$/.test(resolvedId);
+      if (!isUuid) {
+        const { users } = await listUsers(token);
+        const match = users.find(u => u.username.toLowerCase() === resolvedId.toLowerCase());
+        if (!match) { setError(`User "${resolvedId}" not found`); return; }
+        resolvedId = match.id;
+      }
+
+      const limits = await fetchAiUserLimits(resolvedId, token);
+      const { users } = await listUsers(token);
+      const user = users.find(u => u.id === resolvedId);
       setRow({
-        user_id:         userId.trim(),
-        username:        userId.trim(),
-        full_name:       null,
+        user_id:         resolvedId,
+        username:        user?.username ?? resolvedId,
+        full_name:       user?.full_name ?? null,
         total_requests:  0,
         last_request_at: null,
         hourlyCount:     0,
@@ -701,7 +714,7 @@ function LookupPanel({ token, globalCfg, onAction }: LookupPanelProps) {
         </div>
         <div>
           <h2 className="font-bold text-[#1a1a2e] text-sm">Look Up User</h2>
-          <p className="text-xs text-gray-400">Search by user ID to view and manage limits</p>
+          <p className="text-xs text-gray-400">Search by username or user ID to view and manage limits</p>
         </div>
       </div>
       <div className="px-6 py-5 space-y-4">
