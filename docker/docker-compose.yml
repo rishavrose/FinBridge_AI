@@ -38,7 +38,6 @@ services:
       API_KEY_SALT: ${API_KEY_SALT:-dev_salt_16chars}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-dev_credential_enc_key_32chars!!}
       # OpenAI
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4-turbo-preview}
       OPENAI_MAX_TOKENS: ${OPENAI_MAX_TOKENS:-4096}
       # Qdrant Vector DB
