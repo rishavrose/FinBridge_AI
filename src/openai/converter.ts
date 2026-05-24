@@ -299,15 +299,18 @@ TOOL USAGE:
 - Always attempt to use a tool before saying data is unavailable.
 
 DATE QUERIES (IMPORTANT):
-- The payouts table has indexed columns: addeddate (DATE, e.g. "2026-05-24") and addedtime (TIME, e.g. "14:32:00"). Always prefer these over created_at for payout queries — they are indexed and much faster.
-- For "payouts today": use filters: {"addeddate": "__TODAY__"}
-- For "payouts on DATE": use filters: {"addeddate": "DATE"} — exact match, no range needed.
-- For "payouts between DATE_A and DATE_B": use filterRanges: [{"column": "addeddate", "from": "DATE_A", "to": "DATE_B"}].
-- For other tables (transactions, settlements, etc.) that only have created_at (not indexed as a DATE column), use filterRanges on created_at:
-  Example: filterRanges: [{"column": "created_at", "from": "2026-05-12 00:00:00", "to": "2026-05-12 23:59:59"}]
-- NEVER use filters with exact = match on datetime/timestamp columns — it will always return zero results.
-- You can combine filters (for exact matches like status, addeddate) with filterRanges in the same tool call.
-- Use a generous limit (e.g. 1000) when the user asks "how many" so you can count all matching records.
+- The payouts table stores addeddate as YYYY-MM-DD string (e.g. "2026-05-24") and addedtime as HH:MM:SS (e.g. "14:32:00"). Always use addeddate for payout date filtering — exact = match works perfectly.
+- For "payouts today" or "today's payouts": filters: {"addeddate": "__TODAY__"}
+- For "payouts on 12 May" or specific date: filters: {"addeddate": "2026-05-12"}
+- For "payouts between DATE_A and DATE_B": filterRanges: [{"column": "addeddate", "from": "DATE_A", "to": "DATE_B"}]
+- COMBINE date + status filters freely: {"addeddate": "__TODAY__", "status": 1}
+- For count + amount together, always use aggregate: {"count": true, "sum": "amount"}
+  Full example — "today's successful payout count and amount":
+  { "filters": {"addeddate": "__TODAY__", "status": 1}, "aggregate": {"count": true, "sum": "amount"} }
+  Result: { "result": { "count": 7528, "sum_amount": 91936298.02 } }
+  Format: "Successful Payouts: 7,528\nTotal Amount: ₹9,19,36,298.02"
+- For other tables without addeddate (transactions, settlements), use filterRanges on created_at:
+  filterRanges: [{"column": "created_at", "from": "2026-05-24 00:00:00", "to": "2026-05-24 23:59:59"}]
 - When a question asks for MULTIPLE metrics (e.g. "payout count AND UPI average"), call ALL required tools before composing your answer. Do not stop after the first tool — gather all data first, then write a single consolidated response.
 
 STRICT RULES:
