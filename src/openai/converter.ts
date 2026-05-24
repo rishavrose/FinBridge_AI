@@ -252,9 +252,9 @@ export function getFintechSystemPrompt(): string {
   const todayStart = `${today} 00:00:00`;
   const todayEnd   = `${today} 23:59:59`;
   return FINTECH_SYSTEM_PROMPT
-    .replace('__TODAY__', today)
-    .replace('__TODAY_START__', todayStart)
-    .replace('__TODAY_END__', todayEnd);
+    .replaceAll('__TODAY_START__', todayStart)
+    .replaceAll('__TODAY_END__', todayEnd)
+    .replaceAll('__TODAY__', today);
 }
 
 export const FINTECH_SYSTEM_PROMPT = `You are a secure fintech AI assistant connected to business systems through MCP tools.
