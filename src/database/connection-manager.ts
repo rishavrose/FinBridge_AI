@@ -405,22 +405,40 @@ export async function generateToolsForConnection(id: string, selectedTables?: st
       };
     }
 
+    const hasAddeddate = allowedColumns.has('addeddate');
+    const hasAmount = allowedColumns.has('amount');
+    const hasStatus = allowedColumns.has('status');
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    const usageHints: string[] = [];
+    if (hasAddeddate) usageHints.push(`For "today" use filters.addeddate="${todayStr}".`);
+    if (hasStatus) usageHints.push('status codes: 1=success, 2=initiated, 4=failed, 6=pending, 8=reversed.');
+    if (hasAmount) usageHints.push('For count+amount totals use aggregate={count:true,sum:"amount"} — NEVER fetch rows to count.');
+    const description = [
+      table.comment || `Query \`${config.database}\`.\`${table.name}\` table.`,
+      ...usageHints,
+    ].join(' ');
+
     toolRegistry.register(
       {
         name: toolName,
-        description: table.comment || `Query \`${config.database}\`.\`${table.name}\` with filters, sorting, and pagination.`,
+        description,
         inputSchema: {
           type: 'object',
           properties: {
             filters: {
               type: 'object',
-              description: 'Key-value equality filters (WHERE col = val)',
+              description:
+                'Equality filters (WHERE col = val). ' +
+                (hasAddeddate ? `For date "today" set addeddate="${todayStr}". ` : '') +
+                (hasStatus ? 'For "successful" set status=1, "failed" set status=4, "pending" set status=6. ' : '') +
+                'You MUST include relevant filters when the user mentions a date, status, or any specific value.',
               properties: filterProps,
               additionalProperties: false,
             },
             filterRanges: {
               type: 'array',
-              description: 'Range filters for date/numeric columns. Use for "on date X" or "between A and B" queries.',
+              description: 'Range filters for date/numeric columns. Use for "between A and B" queries.',
               items: {
                 type: 'object',
                 properties: {
@@ -447,7 +465,10 @@ export async function generateToolsForConnection(id: string, selectedTables?: st
             offset: { type: 'integer', minimum: 0, default: 0 },
             aggregate: {
               type: 'object',
-              description: 'Run COUNT/SUM/AVG instead of fetching rows. Use this when the user asks "how many" or "total amount". Returns exact figures even beyond the 1000-row limit.',
+              description:
+                'REQUIRED for any "how many", "count", "total", "sum", "average" question — even if combined with date/status filters. ' +
+                'Returns exact figures via SQL COUNT/SUM/AVG. NEVER fetch rows just to count them. ' +
+                (hasAmount ? `Example for "today's successful payout count and total amount": filters={addeddate:"${todayStr}",status:1}, aggregate={count:true,sum:"amount"}.` : ''),
               properties: {
                 count: { type: 'boolean', description: 'Return total matching row count' },
                 sum: { type: 'string', description: 'Column name to SUM (e.g. "amount")' },
