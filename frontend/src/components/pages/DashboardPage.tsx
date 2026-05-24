@@ -105,8 +105,9 @@ function SuccessBar({ rate }: { rate: number }) {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const s = status?.toLowerCase() ?? '';
+function StatusBadge({ status }: { status: string | number | null | undefined }) {
+  const raw = String(status ?? '');
+  const s = raw.toLowerCase();
   const map: Record<string, string> = {
     up:       'bg-emerald-50 text-emerald-700 border-emerald-100',
     active:   'bg-emerald-50 text-emerald-700 border-emerald-100',
@@ -125,9 +126,15 @@ function StatusBadge({ status }: { status: string }) {
     '8':      'bg-purple-50 text-purple-600 border-purple-100',
   };
   const cls = map[s] ?? 'bg-gray-50 text-gray-500 border-gray-100';
+  // Render numeric statuses as friendly labels so the dashboard isn't full of bare digits.
+  const codeLabel: Record<string, string> = {
+    '0': 'initiated', '1': 'success', '2': 'pending', '3': 'sent to bank',
+    '4': 'failed', '6': 'processed', '8': 'reversed', '9': 'deemed success',
+  };
+  const label = codeLabel[s] ?? raw;
   return (
     <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold border capitalize ${cls}`}>
-      {status}
+      {label}
     </span>
   );
 }
@@ -186,7 +193,10 @@ export function DashboardPage({ token }: DashboardPageProps) {
   const uptime   = health?.uptime ?? null;
 
   const totalVolume = transactions.reduce((s, r) => s + Number(r.amount ?? 0), 0);
-  const successCount = transactions.filter(r => r.status === 'success' || r.status === '1').length;
+  const successCount = transactions.filter(r => {
+    const s = String(r.status ?? '').toLowerCase();
+    return s === 'success' || s === '1';
+  }).length;
 
   return (
     <div className="min-h-full bg-[#FAFAFA]">
@@ -387,7 +397,7 @@ export function DashboardPage({ token }: DashboardPageProps) {
               ) : (
                 (() => {
                   const groups = transactions.reduce<Record<string, number>>((acc, t) => {
-                    const k = t.status ?? 'unknown';
+                    const k = String(t.status ?? 'unknown');
                     acc[k] = (acc[k] ?? 0) + 1;
                     return acc;
                   }, {});
@@ -401,7 +411,7 @@ export function DashboardPage({ token }: DashboardPageProps) {
                       processed:'bg-blue-500',   '6': 'bg-blue-500',
                       reversed:'bg-purple-500',  '8': 'bg-purple-500',
                     };
-                    const bar = colors[status.toLowerCase()] ?? 'bg-gray-400';
+                    const bar = colors[String(status).toLowerCase()] ?? 'bg-gray-400';
                     return (
                       <div key={status}>
                         <div className="flex items-center justify-between mb-1.5">
@@ -476,16 +486,19 @@ export function DashboardPage({ token }: DashboardPageProps) {
                         </td>
                       </tr>
                     )
-                    : transactions.map((row, i) => (
+                    : transactions.map((row, i) => {
+                        const rawId = String(row.rrn ?? row.id ?? '');
+                        const rawUserId = row.user_id != null ? String(row.user_id) : '';
+                        return (
                         <tr key={i} className="border-b border-[#F5F5F5] hover:bg-[#FAFAFA] transition-colors group">
                           <td className="px-6 py-3.5">
                             <div>
                               <p className="font-mono text-xs text-[#404040] font-medium">
-                                {(row.rrn ?? row.id ?? '').slice(0, 16)}
-                                {(row.rrn ?? row.id ?? '').length > 16 && <span className="text-gray-300">…</span>}
+                                {rawId.slice(0, 16)}
+                                {rawId.length > 16 && <span className="text-gray-300">…</span>}
                               </p>
-                              {row.user_id && (
-                                <p className="text-[10px] text-gray-300 mt-0.5 font-mono">uid: {row.user_id.slice(0, 8)}…</p>
+                              {rawUserId && (
+                                <p className="text-[10px] text-gray-300 mt-0.5 font-mono">uid: {rawUserId.slice(0, 8)}…</p>
                               )}
                             </div>
                           </td>
@@ -503,10 +516,11 @@ export function DashboardPage({ token }: DashboardPageProps) {
                             </span>
                           </td>
                           <td className="px-6 py-3.5 text-right">
-                            <span className="text-xs text-gray-400">{relativeTime(row.created_at)}</span>
+                            <span className="text-xs text-gray-400">{relativeTime(String(row.created_at ?? ''))}</span>
                           </td>
                         </tr>
-                      ))
+                        );
+                      })
                 }
               </tbody>
             </table>
