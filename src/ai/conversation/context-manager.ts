@@ -110,8 +110,8 @@ export async function getConversationContext(
      FROM chat_messages
      WHERE conversation_id = ?
      ORDER BY created_at ASC
-     LIMIT ?`,
-    [conversationId, MAX_DB_MESSAGES],
+     LIMIT ${MAX_DB_MESSAGES}`,
+    [conversationId],
   );
 
   if (rows.length === 0) {

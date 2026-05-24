@@ -367,8 +367,8 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       `SELECT id, original_prompt, normalized_prompt, intent_category, hit_count, confidence, created_at, updated_at
        FROM ai_knowledge
        ORDER BY hit_count DESC
-       LIMIT ?`,
-      [limit],
+       LIMIT ${limit}`,
+      [],
     );
     return reply.status(200).send({ rows });
   });
@@ -392,8 +392,8 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       `SELECT id, user_id, original_prompt, cache_hit, cache_source, confidence_score, response_ms, tool_calls_count, created_at
        FROM ai_chat_history
        ORDER BY created_at DESC
-       LIMIT ?`,
-      [limit],
+       LIMIT ${limit}`,
+      [],
     );
     return reply.status(200).send({ rows });
   });
@@ -417,8 +417,8 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       `SELECT id, prompt_hash, cache_source, hit, confidence, response_ms, created_at
        FROM ai_cache_logs
        ORDER BY created_at DESC
-       LIMIT ?`,
-      [limit],
+       LIMIT ${limit}`,
+      [],
     );
     return reply.status(200).send({ rows });
   });
