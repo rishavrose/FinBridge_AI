@@ -89,6 +89,16 @@ function tableToToolDefinition(table: TableInfo): McpToolDefinition {
           default: 0,
           description: 'Pagination offset',
         },
+        aggregate: {
+          type: 'object',
+          description: 'Run COUNT/SUM instead of fetching rows. Use this when the user asks "how many" or "total amount". Returns exact figures even beyond the 1000-row limit.',
+          properties: {
+            count: { type: 'boolean', description: 'Return total matching row count' },
+            sum: { type: 'string', description: 'Column name to SUM (e.g. "amount")' },
+            avg: { type: 'string', description: 'Column name to AVG (e.g. "amount")' },
+          },
+          additionalProperties: false,
+        },
       },
       additionalProperties: false,
     },
@@ -135,6 +145,23 @@ function createTableHandler(table: TableInfo) {
       if (range.to !== undefined) {
         conditions.push({ column: range.column, operator: '<=', value: range.to });
       }
+    }
+
+    // Aggregation mode — COUNT / SUM / AVG without fetching rows
+    const agg = args.aggregate as { count?: boolean; sum?: string; avg?: string } | undefined;
+    if (agg && (agg.count || agg.sum || agg.avg)) {
+      const selectParts: string[] = [];
+      if (agg.count) selectParts.push('COUNT(*) AS `count`');
+      if (agg.sum && allowedColumns.has(agg.sum)) selectParts.push(`SUM(\`${agg.sum}\`) AS \`sum_${agg.sum}\``);
+      if (agg.avg && allowedColumns.has(agg.avg)) selectParts.push(`AVG(\`${agg.avg}\`) AS \`avg_${agg.avg}\``);
+
+      const whereClause = conditions.length
+        ? 'WHERE ' + conditions.map((c) => `\`${c.column}\` ${c.operator} ?`).join(' AND ')
+        : '';
+      const aggParams = conditions.map((c) => c.value);
+      const aggSql = `SELECT ${selectParts.join(', ')} FROM \`${table.name}\` ${whereClause}`;
+      const aggRows = await executeSelect<Record<string, number>>(aggSql, aggParams);
+      return { result: aggRows[0] ?? {}, table: table.name };
     }
 
     const { sql, params } = buildSelectQuery({

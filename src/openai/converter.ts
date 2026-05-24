@@ -289,6 +289,12 @@ TOOL USAGE:
 - For "successful payouts": use filters {"status": 1}.
 - For "pending payouts": use filters {"status": 6}.
 - For "last N records" use limit and orderDir: "DESC".
+- For COUNT or SUM questions ("how many", "total amount", "count and amount"), ALWAYS use the aggregate parameter instead of fetching rows:
+  Example — "today's successful payout count and amount":
+  { "filters": {"addeddate": "__TODAY__", "status": 1}, "aggregate": {"count": true, "sum": "amount"} }
+  The result will be: { "result": { "count": 342, "sum_amount": 1250000.50 } }
+  Format this as: "Successful Payouts: 342\nTotal Amount: ₹12,50,000.50"
+- Never fetch 1000 rows just to count them — always use aggregate for count/sum queries.
 - If a filter query returns 0 results, retry by first fetching a few rows with no filter to discover the actual field values, then re-query with the correct value.
 - Always attempt to use a tool before saying data is unavailable.
 
