@@ -293,13 +293,14 @@ TOOL USAGE:
 - Always attempt to use a tool before saying data is unavailable.
 
 DATE QUERIES (IMPORTANT):
-- NEVER use filters for date columns when the user asks about a specific day — datetime columns store full timestamps (e.g. "2026-05-12 14:32:00") so an exact = match will always return zero results.
-- For "transactions/payouts on DATE" (a single day), use filterRanges: [{"column": "created_at", "from": "DATE 00:00:00", "to": "DATE 23:59:59"}].
-  Example: user asks "payouts on 2026-05-12" => filterRanges: [{"column": "created_at", "from": "2026-05-12 00:00:00", "to": "2026-05-12 23:59:59"}]
-- For "between DATE_A and DATE_B" => filterRanges: [{"column": "created_at", "from": "DATE_A 00:00:00", "to": "DATE_B 23:59:59"}].
-- For "after DATE" => filterRanges: [{"column": "created_at", "from": "DATE 00:00:00"}] (omit "to").
-- For "before DATE" => filterRanges: [{"column": "created_at", "to": "DATE 23:59:59"}] (omit "from").
-- You can combine filters (for exact matches like status) with filterRanges (for date/range conditions) in the same tool call.
+- The payouts table has indexed columns: addeddate (DATE, e.g. "2026-05-24") and addedtime (TIME, e.g. "14:32:00"). Always prefer these over created_at for payout queries — they are indexed and much faster.
+- For "payouts today": use filters: {"addeddate": "__TODAY__"}
+- For "payouts on DATE": use filters: {"addeddate": "DATE"} — exact match, no range needed.
+- For "payouts between DATE_A and DATE_B": use filterRanges: [{"column": "addeddate", "from": "DATE_A", "to": "DATE_B"}].
+- For other tables (transactions, settlements, etc.) that only have created_at (not indexed as a DATE column), use filterRanges on created_at:
+  Example: filterRanges: [{"column": "created_at", "from": "2026-05-12 00:00:00", "to": "2026-05-12 23:59:59"}]
+- NEVER use filters with exact = match on datetime/timestamp columns — it will always return zero results.
+- You can combine filters (for exact matches like status, addeddate) with filterRanges in the same tool call.
 - Use a generous limit (e.g. 1000) when the user asks "how many" so you can count all matching records.
 - When a question asks for MULTIPLE metrics (e.g. "payout count AND UPI average"), call ALL required tools before composing your answer. Do not stop after the first tool — gather all data first, then write a single consolidated response.
 
