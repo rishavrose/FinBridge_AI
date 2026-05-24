@@ -44,6 +44,8 @@ import { aiChatRoutes } from './routes/ai-chat.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { alertRoutes } from './routes/alerts.js';
 import { aiRateLimitRoutes } from './routes/ai-rate-limit.js';
+import { dashboardWidgetRoutes } from './routes/dashboard-widgets.js';
+import { ensureDashboardWidgetsTable } from '../dashboard/widgets.js';
 
 // ─── Build server ─────────────────────────────────────────────────────────────
 
@@ -130,6 +132,7 @@ export async function buildServer() {
         { name: 'AI', description: 'OpenAI function-calling chat interface' },
         { name: 'Database', description: 'Dynamic database connection management' },
         { name: 'Admin', description: 'Admin controls for AI rate limiting and usage management' },
+        { name: 'Dashboard', description: 'Per-widget data-source configuration for the Overview dashboard' },
       ],
     },
   });
@@ -173,6 +176,7 @@ export async function buildServer() {
   await fastify.register(analyticsRoutes);
   await fastify.register(alertRoutes);
   await fastify.register(aiRateLimitRoutes);
+  await fastify.register(dashboardWidgetRoutes);
 
   return fastify;
 }
@@ -193,6 +197,13 @@ async function main() {
   // 3. Seed default admin if no users exist
   await ensureDefaultAdmin();
   logger.info('✅ User store ready');
+
+  // 3b. Ensure dashboard widget config table exists + seed defaults
+  try {
+    await ensureDashboardWidgetsTable();
+  } catch (err) {
+    logger.warn({ err }, '⚠️  Dashboard widget table init failed — dashboard may show empty widgets');
+  }
 
   // 4. Register static domain tools
   registerStaticTools();

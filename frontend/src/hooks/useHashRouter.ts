@@ -10,11 +10,13 @@ export type Page =
   | 'ai-memory'
   | 'analytics'
   | 'users'
-  | 'ai-rate-limit';
+  | 'ai-rate-limit'
+  | 'dashboard-settings';
 
 const VALID_PAGES = new Set<Page>([
   'dashboard', 'chat', 'tools', 'mcp', 'keys',
   'db', 'ai-memory', 'analytics', 'users', 'ai-rate-limit',
+  'dashboard-settings',
 ]);
 
 function getPageFromHash(): Page {

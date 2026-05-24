@@ -598,3 +598,67 @@ export async function fetchAiUsageAnalytics(
     token,
   );
 }
+
+// ─── Dashboard widget configuration ──────────────────────────────────────────
+
+export interface DashboardWidgetConfig {
+  widget_key: string;
+  display_label: string;
+  tool_name: string;
+  args: Record<string, unknown>;
+  count_args: Record<string, unknown> | null;
+  column_map: Record<string, string> | null;
+  description: string | null;
+  enabled: boolean;
+  updated_at: string;
+}
+
+export interface DashboardWidgetData {
+  widget_key: string;
+  display_label: string;
+  tool_name: string;
+  rows: Array<Record<string, unknown>>;
+  count: number | null;
+  raw: unknown;
+  error?: string;
+}
+
+export async function listDashboardWidgets(token: string): Promise<{ widgets: DashboardWidgetConfig[]; count: number }> {
+  return apiFetch<{ widgets: DashboardWidgetConfig[]; count: number }>('/dashboard/widgets', {}, token);
+}
+
+export async function getDashboardWidget(key: string, token: string): Promise<DashboardWidgetConfig> {
+  return apiFetch<DashboardWidgetConfig>(`/dashboard/widgets/${encodeURIComponent(key)}`, {}, token);
+}
+
+export async function saveDashboardWidget(
+  key: string,
+  payload: {
+    display_label: string;
+    tool_name: string;
+    args: Record<string, unknown>;
+    count_args?: Record<string, unknown> | null;
+    column_map?: Record<string, string> | null;
+    description?: string | null;
+    enabled?: boolean;
+  },
+  token: string,
+): Promise<DashboardWidgetConfig> {
+  return apiFetch<DashboardWidgetConfig>(
+    `/dashboard/widgets/${encodeURIComponent(key)}`,
+    { method: 'PUT', body: JSON.stringify(payload) },
+    token,
+  );
+}
+
+export async function deleteDashboardWidget(key: string, token: string): Promise<{ success: boolean }> {
+  return apiFetch<{ success: boolean }>(
+    `/dashboard/widgets/${encodeURIComponent(key)}`,
+    { method: 'DELETE' },
+    token,
+  );
+}
+
+export async function fetchDashboardWidgetData(key: string, token: string): Promise<DashboardWidgetData> {
+  return apiFetch<DashboardWidgetData>(`/dashboard/widgets/${encodeURIComponent(key)}/data`, {}, token);
+}

@@ -317,10 +317,57 @@ GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_user_limits   TO 'finbridge_read
 GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_usage_stats   TO 'finbridge_readonly'@'%';
 FLUSH PRIVILEGES;
 
+-- ── Dashboard widget configuration ─────────────────────────────────────────────
+-- Maps each dashboard widget to a dynamic query_* tool with stored args and a
+-- column map. Admins update these from the Settings UI; the dashboard reads
+-- them via GET /dashboard/widgets/:key/data.
+CREATE TABLE IF NOT EXISTS dashboard_widgets (
+  widget_key       VARCHAR(64)  NOT NULL PRIMARY KEY,
+  display_label    VARCHAR(128) NOT NULL,
+  tool_name        VARCHAR(128) NOT NULL,
+  args_json        JSON         NOT NULL  COMMENT 'Primary tool args (filters, orderBy, limit, etc.)',
+  count_args_json  JSON         NULL      COMMENT 'Optional secondary args run via aggregate to produce a top-level count',
+  column_map_json  JSON         NULL      COMMENT 'Maps result columns to canonical fields (id, amount, status, created_at, bank_code)',
+  description      VARCHAR(255) NULL,
+  enabled          TINYINT(1)   NOT NULL DEFAULT 1,
+  updated_by       VARCHAR(36)  NULL,
+  created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='Per-widget dashboard data source mapping';
+GRANT INSERT, UPDATE, DELETE ON finbridge_db.dashboard_widgets TO 'finbridge_readonly'@'%';
+FLUSH PRIVILEGES;
+
 -- ── Seed data ──────────────────────────────────────────────────────────────────
 
 -- Seed default global rate limit config (single row, id=1)
 INSERT IGNORE INTO ai_rate_config (id, ai_enabled, hourly_limit, daily_limit) VALUES (1, 1, 100, 1000);
+
+-- Seed default dashboard widget mappings (admin can change from Settings UI).
+-- These point at the default payouts tool; if you don't have that tool, edit
+-- them from /settings/dashboard.
+INSERT IGNORE INTO dashboard_widgets (widget_key, display_label, tool_name, args_json, count_args_json, column_map_json, description) VALUES
+  ('recent_transactions',
+   'Recent Transactions',
+   'query_securenxt_tbl_payouts',
+   JSON_OBJECT('orderBy', 'id', 'orderDir', 'DESC', 'limit', 8),
+   NULL,
+   JSON_OBJECT('id', 'id', 'amount', 'amount', 'status', 'status', 'created_at', 'addeddate', 'bank_code', 'bankname'),
+   'Latest payouts ordered by id DESC.'),
+  ('failed_payouts',
+   'Failed Payouts',
+   'query_securenxt_tbl_payouts',
+   JSON_OBJECT('filters', JSON_OBJECT('status', 4), 'orderBy', 'id', 'orderDir', 'DESC', 'limit', 5),
+   JSON_OBJECT('filters', JSON_OBJECT('status', 4), 'aggregate', JSON_OBJECT('count', true)),
+   JSON_OBJECT('id', 'id', 'amount', 'amount', 'status', 'status', 'created_at', 'addeddate', 'bank_code', 'bankname'),
+   'Top failed payouts (status=4) plus an exact total count via aggregate.'),
+  ('transaction_mix',
+   'Transaction Mix',
+   'query_securenxt_tbl_payouts',
+   JSON_OBJECT('columns', JSON_ARRAY('status'), 'orderBy', 'id', 'orderDir', 'DESC', 'limit', 100),
+   NULL,
+   JSON_OBJECT('status', 'status'),
+   'Sample of last 100 rows to compute status mix client-side.');
 
 INSERT IGNORE INTO bank_health (bank_code, bank_name, status, success_rate_24h, avg_response_ms, total_requests_24h, failed_requests_24h) VALUES
   ('GTB',     'Guaranty Trust Bank',   'operational', 99.87, 312,  45820, 60),

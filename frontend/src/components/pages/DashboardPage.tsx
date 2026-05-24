@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { fetchHealth, executeTool } from '../../api/client';
+import { fetchHealth, executeTool, fetchDashboardWidgetData } from '../../api/client';
 import type { HealthStatus, BankHealthRow, TransactionRow } from '../../types';
 
 interface DashboardPageProps {
@@ -147,11 +147,11 @@ export function DashboardPage({ token }: DashboardPageProps) {
     setLoading(true);
     setError(null);
     try {
-      const [healthRes, bankRes, txRes, failedRes] = await Promise.allSettled([
+      const [healthRes, bankRes, recentRes, failedRes] = await Promise.allSettled([
         fetchHealth(token),
         executeTool('get_bank_health', { limit: 10 }, token),
-        executeTool('get_recent_transactions', { limit: 8 }, token),
-        executeTool('get_failed_payouts', { limit: 100 }, token),
+        fetchDashboardWidgetData('recent_transactions', token),
+        fetchDashboardWidgetData('failed_payouts', token),
       ]);
 
       if (healthRes.status === 'fulfilled') setHealth(healthRes.value);
@@ -160,15 +160,14 @@ export function DashboardPage({ token }: DashboardPageProps) {
           ? (bankRes.value.data as { rows: BankHealthRow[] }).rows : [];
         setBankHealth(rows);
       }
-      if (txRes.status === 'fulfilled') {
-        const rows = Array.isArray((txRes.value.data as { rows?: TransactionRow[] })?.rows)
-          ? (txRes.value.data as { rows: TransactionRow[] }).rows : [];
-        setTransactions(rows);
+      if (recentRes.status === 'fulfilled') {
+        const widget = recentRes.value;
+        setTransactions((widget.rows ?? []) as unknown as TransactionRow[]);
       }
       if (failedRes.status === 'fulfilled') {
-        const rows = Array.isArray((failedRes.value.data as { rows?: unknown[] })?.rows)
-          ? (failedRes.value.data as { rows: unknown[] }).rows : [];
-        setFailedCount(rows.length);
+        const widget = failedRes.value;
+        // Prefer exact aggregate count when available; otherwise fall back to row length.
+        setFailedCount(widget.count ?? widget.rows.length);
       }
       setLastUpdated(new Date());
     } catch (err) {
