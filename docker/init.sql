@@ -9,6 +9,25 @@ FLUSH PRIVILEGES;
 
 USE finbridge_db;
 
+-- App users (authentication)
+CREATE TABLE IF NOT EXISTS app_users (
+  id            VARCHAR(36)   NOT NULL PRIMARY KEY,
+  username      VARCHAR(64)   NOT NULL UNIQUE,
+  password_hash VARCHAR(255)  NOT NULL,
+  full_name     VARCHAR(128)  DEFAULT NULL,
+  role          ENUM('admin','analyst','viewer') NOT NULL DEFAULT 'viewer',
+  is_active     TINYINT(1)    NOT NULL DEFAULT 1,
+  created_by    VARCHAR(36)   DEFAULT NULL,
+  created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_username (username),
+  INDEX idx_role     (role)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Application users';
+
+-- Grant write access to app_users
+GRANT INSERT, UPDATE, DELETE ON finbridge_db.app_users TO 'finbridge_readonly'@'%';
+FLUSH PRIVILEGES;
+
 -- Transactions
 CREATE TABLE IF NOT EXISTS transactions (
   id              VARCHAR(36)    NOT NULL PRIMARY KEY,
