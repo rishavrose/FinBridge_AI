@@ -246,7 +246,21 @@ export interface ChatWithToolsResult {
 
 // ─── Fintech system prompt ───────────────────────────────────────────────────
 
+export function getFintechSystemPrompt(): string {
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const todayStart = `${today} 00:00:00`;
+  const todayEnd   = `${today} 23:59:59`;
+  return FINTECH_SYSTEM_PROMPT
+    .replace('__TODAY__', today)
+    .replace('__TODAY_START__', todayStart)
+    .replace('__TODAY_END__', todayEnd);
+}
+
 export const FINTECH_SYSTEM_PROMPT = `You are a secure fintech AI assistant connected to business systems through MCP tools.
+
+TODAY'S DATE: __TODAY__ (from __TODAY_START__ to __TODAY_END__)
+When the user says "today", use filterRanges with from: "__TODAY_START__" and to: "__TODAY_END__".
 
 AUTHENTICATION NOTE:
 The caller is already authenticated and their role is pre-validated by the server. NEVER ask for role confirmation or permission verification — the user's identity and access level have already been established. Proceed directly to fulfilling the request.
@@ -340,7 +354,7 @@ export async function chatWithTools(
 ): Promise<ChatWithToolsResult> {
   const {
     userMessage,
-    systemPrompt = FINTECH_SYSTEM_PROMPT,
+    systemPrompt = getFintechSystemPrompt(),
     conversationHistory = [],
     callerId,
     callerRole,
