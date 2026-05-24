@@ -16,6 +16,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.string().default('3000').transform(Number),
   HOST: z.string().default('0.0.0.0'),
+  CORS_ORIGINS: z.string().optional(),
 
   // MySQL — use a READONLY database user
   DB_HOST: z.string().min(1, 'DB_HOST is required'),
@@ -101,5 +102,12 @@ if (!result.success) {
   process.exit(1);
 }
 
-export const env = result.data;
+const rawEnv = result.data;
+
+// AI Memory requires OpenAI embeddings — disable it automatically when no key is configured.
+export const env = {
+  ...rawEnv,
+  AI_MEMORY_ENABLED: rawEnv.AI_MEMORY_ENABLED && !!rawEnv.OPENAI_API_KEY,
+};
+
 export type Env = typeof env;

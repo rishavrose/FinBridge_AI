@@ -16,106 +16,98 @@ import type { McpToolContext, OpenAiFunctionDefinition, Role } from '../types/in
 // ─── Analytics response validation ────────────────────────────────────────────
 
 /**
- * Checks if a response is just placeholder text (not actual metrics).
- * Returns true if the response looks like it's asking to summarize or analyze.
+ * Checks if a response is pure placeholder text with no real data.
+ *
+ * A response is a placeholder only when it is:
+ *   (a) empty / blank
+ *   (b) a short (< 120 chars) meta-phrase with no numeric data
+ *   (c) a clarification request
+ *   (d) a trailing "would you like X?" question
+ *
+ * Responses that START with an intro phrase but then contain actual data
+ * (numbers, bullet points, multiple lines) are NOT placeholders.
+ * Example — NOT a placeholder:
+ *   "Here are the 329 failed payouts:\nTotal: ₹128,500\n..."
+ *   "Based on the records, failures are caused by bank timeouts (247/329)."
  */
 export function isPlaceholderResponse(response: string): boolean {
-  if (!response || response.length === 0) return true;
+  if (!response || response.trim().length === 0) return true;
 
-  const lowerResponse = response.toLowerCase().trim();
+  const trimmed = response.trim();
+  const lower = trimmed.toLowerCase();
 
-  // Direct placeholder patterns
-  const placeholders = [
+  // Responses with actual numeric data — keep regardless of intro phrase
+  const hasData =
+    /[A-Za-z\s]+:\s*[\d₹$€£,\.]+/.test(trimmed) ||   // "Metric: value" lines
+    (/\d/.test(trimmed) && trimmed.split('\n').length >= 2); // multi-line with numbers
+  if (hasData) return false;
+
+  // Trailing "would you like / shall I / do you want?" question with no data
+  if (
+    /would\s+you\s+like|shall\s+i\s+|do\s+you\s+want/i.test(lower) &&
+    lower.endsWith('?')
+  ) {
+    return true;
+  }
+
+  // Clarification / more-info requests
+  if (
+    lower.includes('could you please provide') ||
+    lower.includes('please provide more detail') ||
+    lower.includes('need more information') ||
+    lower.includes('could you clarify') ||
+    lower.includes('could you specify')
+  ) {
+    return true;
+  }
+
+  // Pure meta-phrases — only flagged when the entire response is short and
+  // contains nothing but the filler phrase (no actual data after it)
+  const pureMetaPhrases = [
     'please summarize',
     'let me summarize',
     'to summarize',
     'in summary',
-    'here are the',
-    'based on the',
-    'according to',
-    'from the tool',
-    'the results show',
-    'the tool calls',
     'let me analyze',
-    'i\'ll analyze',
+    "i'll analyze",
     'i will analyze',
-    'you can see',
-    'this represents',
-    'you requested',
-    'the query',
-    'would you like',
     'summarize the results',
-    'format.*clear.*readable',
   ];
 
-  for (const ph of placeholders) {
-    if (lowerResponse.includes(ph) || new RegExp(ph).test(lowerResponse)) {
-      return true;
+  if (trimmed.length < 120) {
+    for (const ph of pureMetaPhrases) {
+      if (lower.includes(ph)) return true;
     }
-  }
-
-  // If response looks like a question or request for more info, it's a placeholder
-  if (lowerResponse.endsWith('?') && lowerResponse.includes('would')) {
-    return true;
-  }
-
-  // If it's asking for clarification or more details
-  if (
-    lowerResponse.includes('clarif') ||
-    lowerResponse.includes('could you') ||
-    lowerResponse.includes('please provide') ||
-    lowerResponse.includes('need more')
-  ) {
-    return true;
   }
 
   return false;
 }
 
 /**
- * Validates that the response is actual analytics data, not placeholder text.
- * Rejects common placeholder patterns like "summarize", "based on", "here are", etc.
+ * Final sanity check on the analytics response before returning.
+ * Only rejects responses that are purely a one-liner placeholder with no data.
+ * Preserves any response — even one starting with an intro phrase — if it
+ * contains actual data lines (colons, numbers, bullet points) after the intro.
  */
 function validateAndCleanAnalyticsResponse(response: string): string {
   const cleaned = response.trim();
+  if (!cleaned) return '';
 
-  // List of placeholder patterns to reject
-  const placeholderPatterns = [
-    /^please\s+(summarize|analyze|provide)/i,
-    /^here\s+are\s+the/i,
-    /^based\s+on\s+the\s+tool\s+calls/i,
-    /^let\s+me\s+(summarize|analyze)/i,
-    /^to\s+summarize/i,
-    /^in\s+summary/i,
-    /^the\s+results?\s+show/i,
-    /^according\s+to\s+the\s+data/i,
-    /^from\s+the\s+tool\s+responses/i,
-    /^this\s+represents/i,
-    /^you\s+can\s+see/i,
-  ];
-
-  // Check if response starts with placeholder pattern
-  for (const pattern of placeholderPatterns) {
-    if (pattern.test(cleaned)) {
-      // Response is placeholder text — extract actual data if possible
-      // or return indication that tool execution should be retried
-      logger.warn(
-        { response: cleaned.slice(0, 100) },
-        'Analytics response detected as placeholder — extracting data',
-      );
-
-      // Try to extract lines that look like metrics (contain colons or numbers)
-      const lines = cleaned.split('\n');
-      const metricLines = lines.filter(
-        (line) => line.includes(':') || /\d+/.test(line),
-      );
-
-      if (metricLines.length > 0) {
-        return metricLines.join('\n').trim();
+  // Only reject if the ENTIRE response is a short pure-filler phrase (< 80 chars)
+  if (cleaned.length < 80) {
+    const pureFiller = [
+      /^please\s+(summarize|analyze|provide)\s*\.?\s*$/i,
+      /^let\s+me\s+(summarize|analyze)\s*\.?\s*$/i,
+      /^to\s+summarize\s*[,:]?\s*$/i,
+      /^in\s+summary\s*[,:]?\s*$/i,
+      /^here\s+are\s+the\s+results?\s*[:\.]?\s*$/i,
+      /^the\s+results?\s+show\s*[:\.]?\s*$/i,
+    ];
+    for (const pattern of pureFiller) {
+      if (pattern.test(cleaned)) {
+        logger.warn({ response: cleaned }, 'Pure placeholder response rejected');
+        return '';
       }
-
-      // If no metrics found, return empty to trigger retry
-      return '';
     }
   }
 
@@ -212,11 +204,28 @@ export function getAllOpenAiFunctions(callerRole: Role): OpenAiFunctionDefinitio
   return toolRegistry.listTools(callerRole).map(mcpToolToOpenAiFunction);
 }
 
+// ─── Query-type detection ────────────────────────────────────────────────────
+
+/**
+ * Returns true if the user is asking an analytical/diagnostic question
+ * ("why", "how", "explain", "what caused") rather than requesting a numeric
+ * summary ("show", "count", "how many", "list").
+ *
+ * Used to pick the right retry prompt when the first response is empty.
+ */
+function isAnalyticalQuery(message: string): boolean {
+  return /^\s*(why|how|what\s+(caused|went\s+wrong|is\s+the\s+reason|are\s+the\s+reasons?|is\s+happening)|explain|describe\s+why|analyze\s+why|reason\s+for)/i.test(
+    message.trim(),
+  );
+}
+
 // ─── Chat option types ───────────────────────────────────────────────────────
 
 export interface ChatWithToolsOptions {
   userMessage: string;
   systemPrompt?: string;
+  /** Prior conversation turns to inject between the system prompt and the current message */
+  conversationHistory?: ChatCompletionMessageParam[];
   callerId: string;
   callerRole: Role;
   callerName?: string;
@@ -298,11 +307,17 @@ STRICT RULES:
 
 6. Never expose: database credentials, API secrets, infrastructure details, server configuration.
 
-7. Response Style: analytics-focused, numeric, actionable. Format as:
-   - Metric Name: value
-   - One metric per line
-   - Include units if relevant (count, amount, %)
-   - Omit introductory phrases
+7. Response Style — choose based on the question type:
+   • QUANTITATIVE queries ("show", "count", "how many", "list", "total"):
+     - Format: Metric Name: value (one per line)
+     - Include units (count, amount ₹, %)
+     - Omit introductory phrases
+     Example: "Failed Payouts: 329\nTotal Amount: ₹128,500"
+   • ANALYTICAL queries ("why", "how", "explain", "what caused"):
+     - Provide a concise narrative explanation
+     - Reference specific values/codes from the tool data
+     - Use bullet points for multiple causes
+     - DO NOT force metric format — a clear sentence is correct here
 
 8. If tool returns empty results, respond: "Records: 0" or the specific metric with value 0.
 
@@ -326,11 +341,18 @@ export async function chatWithTools(
   const {
     userMessage,
     systemPrompt = FINTECH_SYSTEM_PROMPT,
+    conversationHistory = [],
     callerId,
     callerRole,
     callerName,
     maxToolRounds = 10,
   } = opts;
+
+  if (!env.OPENAI_API_KEY) {
+    const err = new Error('AI chat requires OPENAI_API_KEY — add it to your .env file');
+    (err as NodeJS.ErrnoException & { statusCode?: number }).statusCode = 503;
+    throw err;
+  }
 
   const client = getOpenAiClient();
 
@@ -348,6 +370,7 @@ export async function chatWithTools(
 
   const messages: ChatCompletionMessageParam[] = [
     { role: 'system', content: systemPrompt },
+    ...conversationHistory,
     { role: 'user', content: userMessage },
   ];
 
@@ -379,13 +402,18 @@ export async function chatWithTools(
         const isPlaceholder = isPlaceholderResponse(reply);
 
         if (isPlaceholder || !reply) {
-          // Placeholder detected OR empty reply — force analytics extraction
-          const analyticsPrompt =
-            'You must parse the tool results from above and return the actual numeric metrics/values. ' +
-            'Format EXACTLY as: MetricName: value (one metric per line, no explanations). ' +
-            'Example format:\nFailed Payouts: 47\nTotal Amount: 1250.50\nAverage UPI: 156.75\n' +
-            'Rules: NEVER use placeholder phrases like "summarize", "here are", "based on". ' +
-            'ONLY return the actual computed metrics from the tool data.';
+          // Placeholder detected OR empty reply — retry with a prompt matched
+          // to the query type so we don't ask for "MetricName: value" when
+          // the user asked a narrative "why/how/explain" question.
+          const analyticsPrompt = isAnalyticalQuery(userMessage)
+            ? 'Using ONLY the tool results above, explain the root cause(s) clearly and concisely. ' +
+              'Include specific error codes, failure types, counts, and patterns you observe in the data. ' +
+              'Do NOT use generic phrases — reference the actual values returned by the tools.'
+            : 'You must parse the tool results from above and return the actual numeric metrics/values. ' +
+              'Format EXACTLY as: MetricName: value (one metric per line, no explanations). ' +
+              'Example format:\nFailed Payouts: 47\nTotal Amount: 1250.50\nAverage UPI: 156.75\n' +
+              'Rules: NEVER use placeholder phrases like "summarize", "here are", "based on". ' +
+              'ONLY return the actual computed metrics from the tool data.';
 
           messages.push({
             role: 'user',
@@ -450,11 +478,13 @@ export async function chatWithTools(
   // Add explicit instruction to parse tool results and return metrics.
   if (toolCallsExecuted > 0) {
     try {
-      const analyticsPrompt =
-        'Parse the tool results above and return the actual numeric metrics/values. ' +
-        'Format as: MetricName: value (one per line). ' +
-        'Never use placeholder text or ask for clarification. ' +
-        'Extract and compute real values only.';
+      const analyticsPrompt = isAnalyticalQuery(userMessage)
+        ? 'Using ONLY the tool results above, explain the root cause(s) clearly and concisely. ' +
+          'Include specific error codes, failure types, counts, and patterns from the data.'
+        : 'Parse the tool results above and return the actual numeric metrics/values. ' +
+          'Format as: MetricName: value (one per line). ' +
+          'Never use placeholder text or ask for clarification. ' +
+          'Extract and compute real values only.';
 
       messages.push({
         role: 'user',

@@ -75,7 +75,7 @@ export async function buildServer() {
 
   // ── CORS ───────────────────────────────────────────────────────────────────
   const allowedOrigins = env.CORS_ORIGINS
-    ? env.CORS_ORIGINS.split(',').map(o => o.trim())
+    ? env.CORS_ORIGINS.split(',').map((o: string) => o.trim())
     : true;
 
   await fastify.register(cors, {

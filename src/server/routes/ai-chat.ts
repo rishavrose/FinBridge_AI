@@ -29,11 +29,17 @@ import { v4 as uuidv4 } from 'uuid';
 import { authenticateRequest } from '../../middleware/auth.js';
 import { checkAiRateLimit } from '../../middleware/ai-rate-limit.js';
 import { executeSelect, executeWrite } from '../../database/client.js';
+import { env } from '../../config/env.js';
 import { chatWithTools, isPlaceholderResponse } from '../../openai/converter.js';
 import type { ToolCallTrace } from '../../openai/converter.js';
 import { queryMemory, buildLearningPayload, formatValidatedResponse } from '../../ai/memory/index.js';
 import { enqueueLearning } from '../../ai/workers/index.js';
 import { recordCacheLog, recordChatHistory, getCacheStats } from '../../ai/analytics/index.js';
+import {
+  getConversationContext,
+  appendToContextCache,
+  isContextualMessage,
+} from '../../ai/conversation/context-manager.js';
 import { logger } from '../../utils/logger.js';
 import type { Role } from '../../types/index.js';
 
@@ -142,6 +148,18 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       );
     }
 
+    // ── 1a. Load conversation context (BEFORE saving current message) ─────────
+    // Fetches prior turns from Redis (L1) or MySQL (L2) so the context does
+    // not include the message being processed now.
+    const conversationContext = await getConversationContext(conversationId);
+
+    // If the message contains pronouns or follow-up references ("they", "it",
+    // "why are they failing?", etc.) AND there is prior context to resolve them
+    // against, skip the prompt-hash semantic cache — a cached response for
+    // "failed payouts" is meaningless for the contextual question "why are they
+    // failing?".
+    const skipSemanticCache = conversationContext.length > 0 && isContextualMessage(message);
+
     // ── 2. Save the user message ──────────────────────────────────────────────
     const userMessageId = uuidv4();
     await executeWrite(
@@ -150,7 +168,17 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     );
 
     // ── 3. AI Memory lookup ───────────────────────────────────────────────────
-    const memoryResult = await queryMemory(message);
+    const memoryResult = skipSemanticCache
+      ? {
+          hit: false as const,
+          source: 'none' as const,
+          responseType: 'miss' as const,
+          normalizedPrompt: message,
+          promptHash: '',
+          intentCategory: 'general_inquiry',
+          lookupMs: 0,
+        }
+      : await queryMemory(message);
 
     let reply_text: string;
     let toolCallsExecuted = 0;
@@ -183,9 +211,17 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       // ── Cache MISS — call OpenAI + MCP tools ───────────────────────────────
       logger.info({ userId, intent: memoryResult.intentCategory }, 'AI chat: cache MISS — calling OpenAI');
 
+      if (!env.OPENAI_API_KEY) {
+        return reply.status(503).send({
+          error: 'AI chat is not available: OPENAI_API_KEY is not configured on the server.',
+          code: 'OPENAI_NOT_CONFIGURED',
+        });
+      }
+
       const chatResult = await chatWithTools({
         userMessage: message,
         systemPrompt,
+        conversationHistory: conversationContext,
         callerId: userId,
         callerRole,
         callerName: request.user.name,
@@ -242,6 +278,11 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     }
 
     const responseMs = Date.now() - startMs;
+
+    // ── 3a. Update Redis context cache (non-blocking) ─────────────────────────
+    // Appends the new user+assistant exchange so the next request in this
+    // conversation gets an L1 cache hit and skips the MySQL round-trip.
+    appendToContextCache(conversationId, message, reply_text).catch(() => {});
 
     // ── 4. Save AI response to chat_messages ──────────────────────────────────
     const assistantMessageId = uuidv4();

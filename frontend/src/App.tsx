@@ -1,5 +1,5 @@
-import { useState } from 'react';
 import { useAuth } from './hooks/useAuth';
+import { useHashRouter } from './hooks/useHashRouter';
 import { Login } from './components/Login';
 import { Layout } from './components/Layout';
 import { DashboardPage } from './components/pages/DashboardPage';
@@ -13,11 +13,9 @@ import { AnalyticsDashboard } from './components/pages/AnalyticsDashboard';
 import { UsersPage } from './components/pages/UsersPage';
 import { AiRateLimitPage } from './components/pages/AiRateLimitPage';
 
-type Page = 'dashboard' | 'chat' | 'tools' | 'mcp' | 'keys' | 'db' | 'ai-memory' | 'analytics' | 'users' | 'ai-rate-limit';
-
 export default function App() {
   const { token, claims, loading, error, login, logout } = useAuth();
-  const [page, setPage] = useState<Page>('dashboard');
+  const { page, setPage } = useHashRouter();
 
   if (!token || !claims) {
     return (

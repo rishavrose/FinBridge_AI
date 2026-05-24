@@ -13,6 +13,7 @@ import { refreshTools } from '../../mcp/generator.js';
 import { authenticateRequest } from '../../middleware/auth.js';
 import { requireRole, checkToolPermission } from '../../middleware/permission.js';
 import { chatWithTools } from '../../openai/converter.js';
+import { env } from '../../config/env.js';
 import { executeSelect, executeWrite } from '../../database/client.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { McpToolContext } from '../../types/index.js';
@@ -187,6 +188,13 @@ export async function toolRoutes(fastify: FastifyInstance): Promise<void> {
       );
 
       // ── Call AI ──────────────────────────────────────────────────────────────
+      if (!env.OPENAI_API_KEY) {
+        return reply.status(503).send({
+          error: 'AI chat is not available: OPENAI_API_KEY is not configured on the server.',
+          code: 'OPENAI_NOT_CONFIGURED',
+        });
+      }
+
       const result = await chatWithTools({
         userMessage: message,
         callerId: request.user.id,
