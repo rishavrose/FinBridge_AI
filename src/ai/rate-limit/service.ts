@@ -354,6 +354,10 @@ export interface UsageAnalyticsRow {
   plan_type: string;
   is_blocked: number;
   is_unlimited: number;
+  /** Custom per-user hourly cap; null means "use global". */
+  hourly_limit: number | null;
+  /** Custom per-user daily cap; null means "use global". */
+  daily_limit: number | null;
 }
 
 export async function getUsageAnalytics(limit = 50): Promise<UsageAnalyticsRow[]> {
@@ -369,6 +373,8 @@ export async function getUsageAnalytics(limit = 50): Promise<UsageAnalyticsRow[]
     plan_type: string | null;
     is_blocked: number | null;
     is_unlimited: number | null;
+    hourly_limit: number | null;
+    daily_limit: number | null;
   }>(
     `SELECT
        s.user_id,
@@ -378,7 +384,9 @@ export async function getUsageAnalytics(limit = 50): Promise<UsageAnalyticsRow[]
        s.last_request_at,
        IFNULL(l.plan_type,    'standard') AS plan_type,
        IFNULL(l.is_blocked,   0)          AS is_blocked,
-       IFNULL(l.is_unlimited, 0)          AS is_unlimited
+       IFNULL(l.is_unlimited, 0)          AS is_unlimited,
+       l.hourly_limit                      AS hourly_limit,
+       l.daily_limit                       AS daily_limit
      FROM ai_usage_stats s
      LEFT JOIN app_users      u ON u.id       = s.user_id
      LEFT JOIN ai_user_limits l ON l.user_id  = s.user_id
@@ -402,6 +410,8 @@ export async function getUsageAnalytics(limit = 50): Promise<UsageAnalyticsRow[]
         plan_type:       r.plan_type   ?? 'standard',
         is_blocked:      r.is_blocked  ?? 0,
         is_unlimited:    r.is_unlimited ?? 0,
+        hourly_limit:    r.hourly_limit ?? null,
+        daily_limit:     r.daily_limit  ?? null,
       };
     }),
   );
@@ -419,6 +429,8 @@ export async function getUserUsage(userId: string): Promise<UsageAnalyticsRow | 
     plan_type: string | null;
     is_blocked: number | null;
     is_unlimited: number | null;
+    hourly_limit: number | null;
+    daily_limit: number | null;
   }>(
     `SELECT
        s.user_id,
@@ -428,7 +440,9 @@ export async function getUserUsage(userId: string): Promise<UsageAnalyticsRow | 
        s.last_request_at,
        IFNULL(l.plan_type,    'standard') AS plan_type,
        IFNULL(l.is_blocked,   0)          AS is_blocked,
-       IFNULL(l.is_unlimited, 0)          AS is_unlimited
+       IFNULL(l.is_unlimited, 0)          AS is_unlimited,
+       l.hourly_limit                      AS hourly_limit,
+       l.daily_limit                       AS daily_limit
      FROM ai_usage_stats s
      LEFT JOIN app_users      u ON u.id       = s.user_id
      LEFT JOIN ai_user_limits l ON l.user_id  = s.user_id
@@ -452,6 +466,8 @@ export async function getUserUsage(userId: string): Promise<UsageAnalyticsRow | 
     plan_type:       r.plan_type   ?? 'standard',
     is_blocked:      r.is_blocked  ?? 0,
     is_unlimited:    r.is_unlimited ?? 0,
+    hourly_limit:    r.hourly_limit ?? null,
+    daily_limit:     r.daily_limit  ?? null,
   };
 }
 

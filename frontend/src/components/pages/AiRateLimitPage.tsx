@@ -474,8 +474,9 @@ function UsageRowCard({ row, globalCfg, token, onAction }: UsageRowProps) {
   const isBlocked   = row.is_blocked   === 1;
   const isUnlimited = row.is_unlimited === 1;
 
-  const hourlyLimit = globalCfg?.hourlyLimit ?? 100;
-  const dailyLimit  = globalCfg?.dailyLimit  ?? 1000;
+  // Per-user custom limit overrides the global default (null = inherit global).
+  const hourlyLimit = row.hourly_limit ?? globalCfg?.hourlyLimit ?? 100;
+  const dailyLimit  = row.daily_limit  ?? globalCfg?.dailyLimit  ?? 1000;
 
   const hourlyPct = isUnlimited ? 0 : pct(row.hourlyCount, hourlyLimit);
   const dailyPct  = isUnlimited ? 0 : pct(row.dailyCount,  dailyLimit);

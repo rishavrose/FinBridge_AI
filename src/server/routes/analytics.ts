@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { authenticateRequest } from '../../middleware/auth.js';
 import {
   getTpsTimeSeries, getPayoutAnalytics, getPayoutTimeSeries,
-  getBankStats, getFailureAnalysis, getOverviewMetrics,
+  getBankStats, getBankStatsFromPayouts, getFailureAnalysis, getOverviewMetrics,
   getCurrentTps,
 } from '../../analytics/service.js';
 import { getSocketIO, getConnectedClients } from '../../realtime/socket.js';
@@ -64,11 +64,38 @@ export async function analyticsRoutes(fastify: FastifyInstance) {
     return reply.send({ breakdown, timeseries });
   });
 
-  /** GET /analytics/banks — bank/PSP health */
+  /** GET /analytics/banks — bank/PSP health (legacy bank_health table) */
   fastify.get('/analytics/banks', async (_req, reply) => {
     const banks = await getBankStats();
     const healthy = banks.filter(b => b.status === 'up' || b.status === 'active').length;
     return reply.send({ banks, summary: { total: banks.length, healthy, degraded: banks.length - healthy } });
+  });
+
+  /**
+   * GET /analytics/banks/live — bank/PSP health derived from tbl_payouts + tbl_bank_lists.
+   *
+   * Joins live payout data (last 24h) with the bank registry to compute
+   * per-bank success rate and average response time. Response shape matches
+   * the dashboard's BankHealthRow contract:
+   *   { rows: [{ bank_code, bank_name, status, success_rate, avg_response_ms, ... }] }
+   */
+  fastify.get('/analytics/banks/live', async (_req, reply) => {
+    const banks = await getBankStatsFromPayouts();
+    const rows = banks.map((b) => ({
+      bank_code: b.bankCode,
+      bank_name: b.bankName,
+      status: b.status,
+      success_rate: b.successRate,
+      avg_response_ms: b.avgResponseMs,
+      total_requests: b.totalRequests,
+      failed_requests: b.failedRequests,
+      last_checked: b.lastChecked,
+    }));
+    const healthy = rows.filter((r) => r.status === 'up').length;
+    return reply.send({
+      rows,
+      summary: { total: rows.length, healthy, degraded: rows.length - healthy },
+    });
   });
 
   /** GET /analytics/failures — failure reason analysis */

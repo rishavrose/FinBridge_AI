@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { fetchHealth, executeTool, fetchDashboardWidgetData } from '../../api/client';
+import { fetchHealth, executeTool, fetchDashboardWidgetData, fetchBankHealthLive } from '../../api/client';
 import type { HealthStatus, BankHealthRow, TransactionRow } from '../../types';
 
 interface DashboardPageProps {
@@ -154,17 +154,23 @@ export function DashboardPage({ token }: DashboardPageProps) {
     setLoading(true);
     setError(null);
     try {
-      const [healthRes, bankRes, recentRes, failedRes] = await Promise.allSettled([
+      const [healthRes, bankRes, bankFallbackRes, recentRes, failedRes] = await Promise.allSettled([
         fetchHealth(token),
-        executeTool('get_bank_health', { limit: 10 }, token),
+        // Primary: live bank health derived from tbl_payouts + tbl_bank_lists
+        fetchBankHealthLive(token),
+        // Fallback: legacy bank_health tool — used only if the live endpoint fails
+        executeTool('get_bank_health', { limit: 10 }, token).catch(() => null),
         fetchDashboardWidgetData('recent_transactions', token),
         fetchDashboardWidgetData('failed_payouts', token),
       ]);
 
       if (healthRes.status === 'fulfilled') setHealth(healthRes.value);
-      if (bankRes.status === 'fulfilled') {
-        const rows = Array.isArray((bankRes.value.data as { rows?: BankHealthRow[] })?.rows)
-          ? (bankRes.value.data as { rows: BankHealthRow[] }).rows : [];
+
+      if (bankRes.status === 'fulfilled' && bankRes.value?.rows?.length) {
+        setBankHealth(bankRes.value.rows as unknown as BankHealthRow[]);
+      } else if (bankFallbackRes.status === 'fulfilled' && bankFallbackRes.value) {
+        const rows = Array.isArray((bankFallbackRes.value.data as { rows?: BankHealthRow[] })?.rows)
+          ? (bankFallbackRes.value.data as { rows: BankHealthRow[] }).rows : [];
         setBankHealth(rows);
       }
       if (recentRes.status === 'fulfilled') {

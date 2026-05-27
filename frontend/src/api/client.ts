@@ -131,6 +131,29 @@ export async function fetchTools(token: string): Promise<{ tools: ToolDefinition
   return apiFetch<{ tools: ToolDefinition[] }>('/tools', {}, token);
 }
 
+/**
+ * Live bank/PSP health derived from tbl_payouts + tbl_bank_lists (last 24h).
+ * Returns the same row shape as the old get_bank_health tool so the dashboard
+ * can consume it without any other changes.
+ */
+export async function fetchBankHealthLive(
+  token: string,
+): Promise<{
+  rows: Array<{
+    bank_code: string;
+    bank_name: string | null;
+    status: string;
+    success_rate: number;
+    avg_response_ms: number;
+    total_requests?: number;
+    failed_requests?: number;
+    last_checked?: string | null;
+  }>;
+  summary: { total: number; healthy: number; degraded: number };
+}> {
+  return apiFetch('/analytics/banks/live', {}, token);
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -536,6 +559,10 @@ export interface AiUsageRow {
   plan_type: string;
   is_blocked: number;
   is_unlimited: number;
+  /** Custom per-user hourly cap; null/undefined means "use global". */
+  hourly_limit?: number | null;
+  /** Custom per-user daily cap; null/undefined means "use global". */
+  daily_limit?: number | null;
 }
 
 export async function fetchAiRateConfig(token: string): Promise<AiRateConfig> {

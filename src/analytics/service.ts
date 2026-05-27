@@ -177,6 +177,80 @@ export async function getPayoutTimeSeries(): Promise<
   return data as { time: string; success: number; failed: number; pending: number }[];
 }
 
+/**
+ * Bank/PSP health derived live from tbl_payouts joined with tbl_bank_lists.
+ *
+ * - success_rate  : 24h success ratio (status = 1 success, 4 failed)
+ * - avg_response_ms: estimated from updated_at - created_at on finalised payouts
+ * - status         : 'up' if rate >= 95, 'degraded' if rate >= 80, 'down' otherwise
+ *
+ * Rows are ordered by lowest success rate first (worst-performing banks surface).
+ */
+export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
+  const { data } = await getOrSet<BankStat[]>(
+    'analytics:banks:from-payouts',
+    async () => {
+      const rows = await executeSelect<{
+        bank_id: string | number;
+        bank_name: string | null;
+        bank_code: string | null;
+        total_requests: string;
+        success_count: string;
+        failed_count: string;
+        avg_response_ms: string | null;
+        last_checked: string | null;
+      }>(
+        `SELECT
+           p.bank_id                                         AS bank_id,
+           b.bank_name                                       AS bank_name,
+           b.bank_code                                       AS bank_code,
+           COUNT(*)                                          AS total_requests,
+           SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END) AS success_count,
+           SUM(CASE WHEN p.status IN (4, '4') THEN 1 ELSE 0 END) AS failed_count,
+           AVG(
+             CASE
+               WHEN p.status IN (1, '1', 4, '4')
+                 AND p.updated_at IS NOT NULL
+                 AND p.created_at IS NOT NULL
+               THEN TIMESTAMPDIFF(MICROSECOND, p.created_at, p.updated_at) / 1000
+               ELSE NULL
+             END
+           )                                                 AS avg_response_ms,
+           MAX(p.updated_at)                                 AS last_checked
+         FROM tbl_payouts p
+         LEFT JOIN tbl_bank_lists b ON b.id = p.bank_id
+         WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+           AND p.bank_id IS NOT NULL
+         GROUP BY p.bank_id, b.bank_name, b.bank_code
+         ORDER BY (SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) ASC
+         LIMIT 50`,
+        [],
+      );
+
+      return rows.map((r) => {
+        const total = Number(r.total_requests ?? 0);
+        const success = Number(r.success_count ?? 0);
+        const failed = Number(r.failed_count ?? 0);
+        const rate = total > 0 ? (success / total) * 100 : 0;
+        const status = rate >= 95 ? 'up' : rate >= 80 ? 'degraded' : 'down';
+
+        return {
+          bankCode: r.bank_code ?? String(r.bank_id),
+          bankName: r.bank_name,
+          status,
+          successRate: Math.round(rate * 10) / 10,
+          avgResponseMs: Math.round(Number(r.avg_response_ms ?? 0)),
+          totalRequests: total,
+          failedRequests: failed,
+          lastChecked: r.last_checked,
+        };
+      });
+    },
+    { ttl: 30 },
+  );
+  return data;
+}
+
 /** Bank health snapshot */
 export async function getBankStats(): Promise<BankStat[]> {
   const { data } = await getOrSet<BankStat[]>(
