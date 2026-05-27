@@ -132,6 +132,31 @@ export async function fetchTools(token: string): Promise<{ tools: ToolDefinition
 }
 
 /**
+ * Recent payouts joined with tbl_bank_lists, in the shape the dashboard's
+ * Recent Transactions table expects (id / rrn / amount / status / created_at / bank_code).
+ * bank_code carries the bank's display name and created_at is the full
+ * addeddate+addedtime timestamp.
+ */
+export async function fetchRecentPayoutsLive(
+  token: string,
+  limit = 8,
+): Promise<{
+  rows: Array<{
+    id: string;
+    rrn: string | null;
+    user_id: string | null;
+    amount: number;
+    currency: string;
+    status: string;
+    created_at: string;
+    bank_code: string | null;
+  }>;
+  count: number;
+}> {
+  return apiFetch(`/analytics/recent-payouts?limit=${limit}`, {}, token);
+}
+
+/**
  * Live bank/PSP health derived from tbl_payouts + tbl_bank_lists (last 24h).
  * Returns the same row shape as the old get_bank_health tool so the dashboard
  * can consume it without any other changes.

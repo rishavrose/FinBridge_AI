@@ -3,7 +3,7 @@ import { authenticateRequest } from '../../middleware/auth.js';
 import {
   getTpsTimeSeries, getPayoutAnalytics, getPayoutTimeSeries,
   getBankStats, getBankStatsFromPayouts, getFailureAnalysis, getOverviewMetrics,
-  getCurrentTps,
+  getCurrentTps, getRecentPayouts,
 } from '../../analytics/service.js';
 import { getSocketIO, getConnectedClients } from '../../realtime/socket.js';
 
@@ -69,6 +69,19 @@ export async function analyticsRoutes(fastify: FastifyInstance) {
     const banks = await getBankStats();
     const healthy = banks.filter(b => b.status === 'up' || b.status === 'active').length;
     return reply.send({ banks, summary: { total: banks.length, healthy, degraded: banks.length - healthy } });
+  });
+
+  /**
+   * GET /analytics/recent-payouts — recent payouts with bank name joined in.
+   *
+   * Joins tbl_payouts × tbl_bank_lists so the dashboard's Recent Transactions
+   * table can show the bank's display name and the actual addedtime instead of
+   * just the date.
+   */
+  fastify.get<{ Querystring: { limit?: string } }>('/analytics/recent-payouts', async (req, reply) => {
+    const limit = Math.min(Math.max(parseInt(req.query.limit ?? '8', 10) || 8, 1), 50);
+    const rows = await getRecentPayouts(limit);
+    return reply.send({ rows, count: rows.length });
   });
 
   /**

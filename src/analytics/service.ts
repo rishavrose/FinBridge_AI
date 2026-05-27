@@ -259,6 +259,84 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
   return data;
 }
 
+// ─── Recent payouts (joined with bank list) ───────────────────────────────────
+
+export interface RecentPayoutRow {
+  id: string;
+  rrn: string | null;
+  user_id: string | null;
+  amount: number;
+  currency: string;
+  status: string;
+  /** Combined addeddate + addedtime as ISO-ish string for relativeTime() in UI. */
+  created_at: string;
+  /** Bank label shown in the "Bank" column — uses tbl_bank_lists.name. */
+  bank_code: string | null;
+}
+
+/**
+ * Most recent payouts from tbl_payouts joined with tbl_bank_lists.
+ * - bank_code  : tbl_bank_lists.name (bank display name)
+ * - created_at : addeddate + ' ' + addedtime  (full timestamp the UI expects)
+ */
+export async function getRecentPayouts(limit = 8): Promise<RecentPayoutRow[]> {
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 50);
+  const { data } = await getOrSet<RecentPayoutRow[]>(
+    `analytics:recent-payouts:${safeLimit}`,
+    async () => {
+      const connectionId = await findConnectionWithTables(['tbl_payouts', 'tbl_bank_lists']);
+      if (!connectionId) {
+        logger.warn('getRecentPayouts: no connection has tbl_payouts + tbl_bank_lists');
+        return [];
+      }
+
+      const sql = `
+        SELECT
+          p.id              AS id,
+          p.utr_rrn         AS rrn,
+          p.userid          AS user_id,
+          p.amount          AS amount,
+          p.status          AS status,
+          p.addeddate       AS addeddate,
+          p.addedtime       AS addedtime,
+          b.name            AS bank_name
+        FROM tbl_payouts p
+        LEFT JOIN tbl_bank_lists b ON b.id = p.bank_id
+        ORDER BY p.id DESC
+        LIMIT ${safeLimit}`;
+
+      const rows = await executeOnConnection<{
+        id: string | number;
+        rrn: string | null;
+        user_id: string | number | null;
+        amount: string | number;
+        status: string | number;
+        addeddate: string | null;
+        addedtime: string | null;
+        bank_name: string | null;
+      }>(connectionId, sql);
+
+      return rows.map((r) => ({
+        id: String(r.id),
+        rrn: r.rrn ?? null,
+        user_id: r.user_id != null ? String(r.user_id) : null,
+        amount: Number(r.amount ?? 0),
+        currency: 'INR',
+        status: String(r.status ?? ''),
+        // The dashboard's relativeTime() parses this with new Date(). Combining
+        // addeddate ("YYYY-MM-DD") and addedtime ("HH:MM:SS") gives a valid
+        // ISO-ish string ("YYYY-MM-DD HH:MM:SS") that the browser accepts.
+        created_at: r.addeddate
+          ? `${r.addeddate}${r.addedtime ? ' ' + r.addedtime : ''}`
+          : '',
+        bank_code: r.bank_name ?? null,
+      }));
+    },
+    { ttl: 15 },
+  );
+  return data;
+}
+
 /** Bank health snapshot */
 export async function getBankStats(): Promise<BankStat[]> {
   const { data } = await getOrSet<BankStat[]>(

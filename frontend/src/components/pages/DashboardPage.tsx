@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { fetchHealth, executeTool, fetchDashboardWidgetData, fetchBankHealthLive } from '../../api/client';
+import { fetchHealth, executeTool, fetchDashboardWidgetData, fetchBankHealthLive, fetchRecentPayoutsLive } from '../../api/client';
 import type { HealthStatus, BankHealthRow, TransactionRow } from '../../types';
 
 interface DashboardPageProps {
@@ -154,12 +154,15 @@ export function DashboardPage({ token }: DashboardPageProps) {
     setLoading(true);
     setError(null);
     try {
-      const [healthRes, bankRes, bankFallbackRes, recentRes, failedRes] = await Promise.allSettled([
+      const [healthRes, bankRes, bankFallbackRes, recentLiveRes, recentRes, failedRes] = await Promise.allSettled([
         fetchHealth(token),
         // Primary: live bank health derived from tbl_payouts + tbl_bank_lists
         fetchBankHealthLive(token),
         // Fallback: legacy bank_health tool — used only if the live endpoint fails
         executeTool('get_bank_health', { limit: 10 }, token).catch(() => null),
+        // Primary: recent payouts with bank join + addedtime
+        fetchRecentPayoutsLive(token, 8),
+        // Fallback: widget API (no join, addeddate only)
         fetchDashboardWidgetData('recent_transactions', token),
         fetchDashboardWidgetData('failed_payouts', token),
       ]);
@@ -173,7 +176,9 @@ export function DashboardPage({ token }: DashboardPageProps) {
           ? (bankFallbackRes.value.data as { rows: BankHealthRow[] }).rows : [];
         setBankHealth(rows);
       }
-      if (recentRes.status === 'fulfilled') {
+      if (recentLiveRes.status === 'fulfilled' && recentLiveRes.value?.rows?.length) {
+        setTransactions(recentLiveRes.value.rows as unknown as TransactionRow[]);
+      } else if (recentRes.status === 'fulfilled') {
         const widget = recentRes.value;
         setTransactions((widget.rows ?? []) as unknown as TransactionRow[]);
       }
