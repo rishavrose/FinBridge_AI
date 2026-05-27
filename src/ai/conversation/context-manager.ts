@@ -23,6 +23,7 @@ import { executeSelect } from '../../database/client.js';
 import { getOpenAiClient, getActiveModel } from '../../openai/client.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
+import { countTokens } from '../context/tokenizer.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,62 @@ export function isContextualMessage(message: string): boolean {
   return CONTEXTUAL_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
+// ─── Live-analytics detection ────────────────────────────────────────────────
+
+/**
+ * Words that signal the user wants a FRESH, real-time reading rather than a
+ * cached one. When matched we MUST bypass the semantic cache so the response
+ * comes from a live MCP/database tool call.
+ *
+ * Example bug this fixes:
+ *   User asks "Current payout success rate?" → cached answer from 10 min ago.
+ *   User says  "recheck"                     → live answer, slightly higher
+ *                                              counts because the DB grew.
+ *   Without this detector the FIRST answer is misleadingly stale.
+ */
+const LIVE_PATTERNS: RegExp[] = [
+  /\b(current|live|latest|now|right\s+now|real[\s-]?time|fresh|today'?s?|as\s+of\s+now)\b/i,
+  /\b(tps|throughput\s+per\s+second|requests\s+per\s+second)\b/i,
+  /\b(last\s+(hour|minute|few\s+minutes))\b/i,
+];
+
+/** Subjects that, combined with a LIVE word, must always be re-queried. */
+const ANALYTICS_SUBJECTS: RegExp[] = [
+  /\bpayout(s)?\b/i,
+  /\btransaction(s)?\b/i,
+  /\bsettlement(s)?\b/i,
+  /\bsuccess\s+rate\b/i,
+  /\bfailure\s+rate\b/i,
+  /\bfailed\b/i,
+  /\bsuccess(ful)?\b/i,
+  /\bbalance(s)?\b/i,
+  /\bmerchant(s)?\b/i,
+  /\bbank(s)?\b/i,
+  /\bdowntime|outage|incident\b/i,
+  /\bcount|total|sum|amount\b/i,
+  /\banalytics|metric|kpi|stat(s|istics)?\b/i,
+];
+
+/**
+ * True if the message asks for a real-time analytic. These queries must
+ * ALWAYS bypass the semantic cache and force a fresh MCP tool call —
+ * cached values become stale as soon as the DB ticks forward.
+ */
+export function isLiveAnalyticsQuery(message: string): boolean {
+  const trimmed = message.trim();
+  const hasLiveWord = LIVE_PATTERNS.some((p) => p.test(trimmed));
+  const hasAnalyticsSubject = ANALYTICS_SUBJECTS.some((p) => p.test(trimmed));
+
+  // "current payout success rate" → live word + subject → live analytics
+  if (hasLiveWord && hasAnalyticsSubject) return true;
+
+  // Pure subjects without a temporal qualifier can be served from cache —
+  // unless the subject itself is intrinsically real-time (TPS, success rate).
+  if (/\b(tps|success\s+rate|failure\s+rate)\b/i.test(trimmed)) return true;
+
+  return false;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ChatMessageRow {
@@ -71,9 +128,9 @@ interface ChatMessageRow {
 
 // ─── Token estimation ─────────────────────────────────────────────────────────
 
-/** Rough estimate used for context pruning. Actual tokenisation varies by model. */
+/** Real tokenizer-backed count; falls back to length/4 on encoder error. */
 function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return countTokens(text);
 }
 
 // ─── Context loading ──────────────────────────────────────────────────────────

@@ -171,6 +171,10 @@ export async function aiChat(
     toolCallsExecuted: res.toolCallsExecuted,
     toolsUsed: [],
     toolCallsTrace: res.toolCallsTrace ?? [],
+    modelTier: res.modelTier,
+    modelUsed: res.modelUsed,
+    grounded: res.grounded,
+    ungroundedFacts: res.ungroundedFacts,
   };
 }
 

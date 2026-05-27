@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { aiChat, listConversations, getConversation, deleteConversation } from '../../api/client';
-import type { ChatMessage, AiChatResponse, Conversation, ConversationMessage } from '../../types';
+import type { ChatMessage, AiChatResponse, Conversation, ConversationMessage, ToolCallInfo } from '../../types';
 import { useVoice } from '../../hooks/useVoice';
 
 interface ChatPageProps {
@@ -93,7 +93,7 @@ function toolLabel(name: string): string {
     .join(' ');
 }
 
-function DataSourcesBadge({ toolCalls }: { toolCalls: Array<{ name: string; args: Record<string, unknown> }> }) {
+function DataSourcesBadge({ toolCalls }: { toolCalls: ToolCallInfo[] }) {
   const unique = [...new Set(toolCalls.map(t => toolLabel(t.name)))];
   return (
     <div className="flex items-center gap-2 mt-2 px-1">
@@ -111,6 +111,76 @@ function DataSourcesBadge({ toolCalls }: { toolCalls: Array<{ name: string; args
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Collapsible inspector that shows the exact SQL + bound params for each tool
+ * call. Lets users cross-check the AI's response against the actual database
+ * query that produced it. Hidden by default to keep the chat surface clean.
+ */
+function QueryInspector({ toolCalls }: { toolCalls: ToolCallInfo[] }) {
+  const [open, setOpen] = useState(false);
+  if (toolCalls.length === 0) return null;
+
+  const renderArgs = (args: Record<string, unknown>): string => {
+    try { return JSON.stringify(args, null, 2); }
+    catch { return String(args); }
+  };
+
+  return (
+    <div className="mt-1 px-1">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1 text-[10px] font-semibold text-gray-400 hover:text-brand uppercase tracking-wide transition"
+      >
+        <svg
+          className={`w-2.5 h-2.5 transition-transform ${open ? 'rotate-90' : ''}`}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M9 5l7 7-7 7" />
+        </svg>
+        {open ? 'Hide query' : `View query (${toolCalls.length})`}
+      </button>
+
+      {open && (
+        <div className="mt-1.5 space-y-2">
+          {toolCalls.map((t, i) => (
+            <div key={i} className="border border-gray-100 rounded-lg bg-gray-50/60 p-2 text-[11px]">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="font-mono text-[10px] text-gray-500">{t.name}</span>
+                <span className="text-[10px] text-gray-400">#{i + 1}</span>
+              </div>
+
+              {t.sql ? (
+                <>
+                  <div className="text-[9px] uppercase font-semibold text-gray-400 tracking-wide mt-1.5 mb-0.5">SQL</div>
+                  <pre className="font-mono text-[10.5px] text-indigo-700 bg-white border border-indigo-50 rounded px-2 py-1.5 whitespace-pre-wrap break-all leading-snug">
+                    {t.sql}
+                  </pre>
+                  {t.params && t.params.length > 0 && (
+                    <>
+                      <div className="text-[9px] uppercase font-semibold text-gray-400 tracking-wide mt-1.5 mb-0.5">Params</div>
+                      <pre className="font-mono text-[10.5px] text-emerald-700 bg-white border border-emerald-50 rounded px-2 py-1 whitespace-pre-wrap break-all leading-snug">
+                        {JSON.stringify(t.params)}
+                      </pre>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="text-[9px] uppercase font-semibold text-gray-400 tracking-wide mt-1.5 mb-0.5">Arguments</div>
+                  <pre className="font-mono text-[10.5px] text-gray-700 bg-white border border-gray-100 rounded px-2 py-1.5 whitespace-pre-wrap break-all leading-snug">
+                    {renderArgs(t.args)}
+                  </pre>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -807,7 +877,10 @@ export function ChatPage({ token }: ChatPageProps) {
 
                 {/* Data sources badge */}
                 {msg.toolCalls && msg.toolCalls.length > 0 && (
-                  <DataSourcesBadge toolCalls={msg.toolCalls} />
+                  <>
+                    <DataSourcesBadge toolCalls={msg.toolCalls} />
+                    <QueryInspector toolCalls={msg.toolCalls} />
+                  </>
                 )}
               </div>
             </div>

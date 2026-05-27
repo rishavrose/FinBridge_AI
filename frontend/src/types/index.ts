@@ -51,15 +51,24 @@ export interface ChatMessage {
 export interface ToolCallInfo {
   name: string;
   args: Record<string, unknown>;
+  /** The exact SQL the tool ran (for query_* tools). Optional. */
+  sql?: string;
+  /** Parameter array bound to the SQL placeholders. */
+  params?: unknown[];
 }
 
 export interface AiChatResponse {
   reply: string;
   toolCallsExecuted: number;
   toolsUsed?: string[];
-  toolCallsTrace?: Array<{ name: string; args: Record<string, unknown> }>;
+  toolCallsTrace?: ToolCallInfo[];
   tokensUsed?: number;
   conversationId: string;
+  modelTier?: 'simple' | 'reasoning' | 'strict';
+  modelUsed?: string;
+  /** True when every numeric/ID fact in the reply was traceable to a tool result. */
+  grounded?: boolean;
+  ungroundedFacts?: Array<{ kind: string; value: string }>;
 }
 
 // ─── Chat History ─────────────────────────────────────────────────────────────
@@ -189,7 +198,11 @@ export interface AiMemoryChatResponse {
   responseType: ResponseType;
   responseMs: number;
   toolCallsExecuted: number;
-  toolCallsTrace?: Array<{ name: string; args: Record<string, unknown> }>;
+  toolCallsTrace?: ToolCallInfo[];
+  modelTier?: 'simple' | 'reasoning' | 'strict';
+  modelUsed?: string;
+  grounded?: boolean;
+  ungroundedFacts?: Array<{ kind: string; value: string }>;
 }
 
 /** Response from GET /ai/chat/stats */

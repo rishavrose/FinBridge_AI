@@ -49,10 +49,18 @@ const envSchema = z.object({
   OPENAI_MODEL: z.string().default('gpt-4-turbo-preview'),
   OPENAI_MAX_TOKENS: z.string().default('4096').transform(Number),
 
+  // Per-query model routing (optional — fall back to OPENAI_MODEL if unset)
+  OPENAI_MODEL_SIMPLE: z.string().optional(),
+  OPENAI_MODEL_REASONING: z.string().optional(),
+  OPENAI_MODEL_STRICT: z.string().optional(),
+
   // NVIDIA NIM (optional — OpenAI-compatible endpoint)
   NVIDIA_API_KEY: z.string().optional(),
   NVIDIA_MODEL: z.string().default('deepseek-ai/deepseek-v4-flash'),
   NVIDIA_BASE_URL: z.string().default('https://integrate.api.nvidia.com/v1'),
+  NVIDIA_MODEL_SIMPLE: z.string().optional(),
+  NVIDIA_MODEL_REASONING: z.string().optional(),
+  NVIDIA_MODEL_STRICT: z.string().optional(),
 
   // Cache TTLs (seconds)
   CACHE_TTL_DEFAULT: z.string().default('300').transform(Number),

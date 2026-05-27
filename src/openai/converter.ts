@@ -6,12 +6,23 @@
  */
 
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions.js';
-import { getOpenAiClient, getActiveModel, getActiveMaxTokens } from './client.js';
+import { getOpenAiClient, getActiveMaxTokens } from './client.js';
 import { toolRegistry } from '../mcp/registry.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { McpToolContext, OpenAiFunctionDefinition, Role } from '../types/index.js';
+import type { ConversationState } from '../ai/conversation/state-engine.js';
+import type { ToolResultEntry } from '../ai/conversation/tool-results.js';
+import { buildToolResultEntry } from '../ai/conversation/tool-results.js';
+import { buildSystemPrompt } from '../ai/prompt/builder.js';
+import { pickModel, type ModelTier } from '../ai/routing/model-router.js';
+import {
+  validateGrounding,
+  joinToolResults,
+  logUngroundedReply,
+  type ValidationResult,
+} from '../ai/validation/hallucination-validator.js';
 
 // ─── Analytics response validation ────────────────────────────────────────────
 
@@ -223,13 +234,20 @@ function isAnalyticalQuery(message: string): boolean {
 
 export interface ChatWithToolsOptions {
   userMessage: string;
+  /** Override the auto-built system prompt. If unset, builder composes one. */
   systemPrompt?: string;
   /** Prior conversation turns to inject between the system prompt and the current message */
   conversationHistory?: ChatCompletionMessageParam[];
+  /** Carries active merchant/payout/topic across turns */
+  conversationState?: ConversationState | null;
+  /** Compact snapshots of tool outputs from prior turns in this conversation */
+  recentToolResults?: ToolResultEntry[];
   callerId: string;
   callerRole: Role;
   callerName?: string;
   maxToolRounds?: number;
+  /** Force a specific model. If unset, the router picks one. */
+  modelOverride?: string;
 }
 
 export interface ToolCallTrace {
@@ -244,6 +262,14 @@ export interface ChatWithToolsResult {
   toolCallsExecuted: number;
   toolCallsTrace: ToolCallTrace[];
   messages: ChatCompletionMessageParam[];
+  /** Tool-result entries captured this turn — persist to the sidecar store */
+  newToolResults: ToolResultEntry[];
+  /** Tier picked by the router (informational) */
+  tier: ModelTier;
+  /** Final model name used (informational) */
+  modelUsed: string;
+  /** Grounding validation outcome (null if no tools ran) */
+  validation: ValidationResult | null;
 }
 
 // ─── Fintech system prompt ───────────────────────────────────────────────────
@@ -366,12 +392,15 @@ export async function chatWithTools(
 ): Promise<ChatWithToolsResult> {
   const {
     userMessage,
-    systemPrompt = getFintechSystemPrompt(),
+    systemPrompt: explicitSystemPrompt,
     conversationHistory = [],
+    conversationState = null,
+    recentToolResults = [],
     callerId,
     callerRole,
     callerName,
     maxToolRounds = 10,
+    modelOverride,
   } = opts;
 
   const activeKey = env.AI_PROVIDER === 'nvidia' ? env.NVIDIA_API_KEY : env.OPENAI_API_KEY;
@@ -381,6 +410,25 @@ export async function chatWithTools(
     (err as NodeJS.ErrnoException & { statusCode?: number }).statusCode = 503;
     throw err;
   }
+
+  // ── Route to a model tier ──────────────────────────────────────────────────
+  const { tier, model: routedModel } = pickModel({
+    message: userMessage,
+    historyLength: conversationHistory.length,
+    hasFinancialContext: recentToolResults.length > 0,
+  });
+  const modelName = modelOverride ?? routedModel;
+
+  // ── Compose the system prompt ──────────────────────────────────────────────
+  // If the caller supplied an explicit override, use it verbatim. Otherwise
+  // build one from base prompt + abstain rules + state + tool snapshots.
+  const systemPrompt = explicitSystemPrompt
+    ?? buildSystemPrompt({
+      basePrompt: getFintechSystemPrompt(),
+      state: conversationState,
+      recentToolResults,
+      tier,
+    });
 
   const client = getOpenAiClient();
 
@@ -413,10 +461,54 @@ export async function chatWithTools(
 
   let toolCallsExecuted = 0;
   const toolCallsTrace: ToolCallTrace[] = [];
+  /** Tool-result entries captured this turn — handed back to the caller for sidecar persistence */
+  const newToolResults: ToolResultEntry[] = [];
+  /** Raw JSON strings of tool results — used by the hallucination validator */
+  const toolResultJsonStrings: string[] = [];
+
+  // ── Helper: run grounding validation + optional one-shot abstain retry ────
+  const validateOrAbstain = async (reply: string): Promise<{ reply: string; validation: ValidationResult | null }> => {
+    if (toolCallsExecuted === 0) return { reply, validation: null };
+    const haystack = joinToolResults(toolResultJsonStrings);
+    const validation = validateGrounding(reply, haystack);
+    if (validation.grounded) return { reply, validation };
+
+    logUngroundedReply(requestId, userMessage, reply, validation);
+
+    // One-shot retry — instruct the model to abstain on the ungrounded facts.
+    const offending = validation.unsupported
+      .slice(0, 8)
+      .map((u) => `${u.kind}: ${u.value}`)
+      .join('; ');
+    messages.push({
+      role: 'user',
+      content:
+        'Your previous answer contained values that do NOT appear in the tool results: ' +
+        offending +
+        '. Rewrite the answer using ONLY values that exist verbatim in the tool results above. ' +
+        'If you cannot ground a value, OMIT it or say "data not available" for that field. ' +
+        'Do not invent or estimate.',
+    });
+    try {
+      const retry = await client.chat.completions.create({
+        model: modelName,
+        messages,
+        tool_choice: 'none',
+        max_completion_tokens: getActiveMaxTokens(),
+      });
+      const retryReply = retry.choices[0]?.message?.content ?? '';
+      const cleaned = validateAndCleanAnalyticsResponse(retryReply) || retryReply;
+      const revalidate = validateGrounding(cleaned, haystack);
+      return { reply: cleaned || reply, validation: revalidate };
+    } catch (err) {
+      logger.warn({ err }, 'hallucination abstain-retry failed — returning original reply with validation flag');
+      return { reply, validation };
+    }
+  };
 
   for (let round = 0; round < maxToolRounds; round++) {
     const response = await client.chat.completions.create({
-      model: getActiveModel(),
+      model: modelName,
       messages,
       tools: functions.map((f) => ({ type: 'function' as const, function: f })),
       tool_choice: 'auto',
@@ -435,13 +527,9 @@ export async function chatWithTools(
 
       // If tools were executed, validate that the response contains real data, not placeholder text
       if (toolCallsExecuted > 0) {
-        // First, check if this is a placeholder response
         const isPlaceholder = isPlaceholderResponse(reply);
 
         if (isPlaceholder || !reply) {
-          // Placeholder detected OR empty reply — retry with a prompt matched
-          // to the query type so we don't ask for "MetricName: value" when
-          // the user asked a narrative "why/how/explain" question.
           const analyticsPrompt = isAnalyticalQuery(userMessage)
             ? 'Using ONLY the tool results above, explain the root cause(s) clearly and concisely. ' +
               'Include specific error codes, failure types, counts, and patterns you observe in the data. ' +
@@ -452,29 +540,33 @@ export async function chatWithTools(
               'Rules: NEVER use placeholder phrases like "summarize", "here are", "based on". ' +
               'ONLY return the actual computed metrics from the tool data.';
 
-          messages.push({
-            role: 'user',
-            content: analyticsPrompt,
-          });
+          messages.push({ role: 'user', content: analyticsPrompt });
 
           const summaryResp = await client.chat.completions.create({
-            model: getActiveModel(),
+            model: modelName,
             messages,
             max_completion_tokens: getActiveMaxTokens(),
           });
           reply = summaryResp.choices[0]?.message?.content ?? '';
-
-          // Validate and clean the response
           reply = validateAndCleanAnalyticsResponse(reply);
 
-          // If still a placeholder after retry, extract metrics manually
           if (isPlaceholderResponse(reply)) {
             reply = extractMetricsFromMessages(messages);
           }
         }
       }
 
-      return { reply, toolCallsExecuted, toolCallsTrace, messages };
+      const { reply: finalReply, validation } = await validateOrAbstain(reply);
+      return {
+        reply: finalReply,
+        toolCallsExecuted,
+        toolCallsTrace,
+        messages,
+        newToolResults,
+        tier,
+        modelUsed: modelName,
+        validation,
+      };
     }
 
     // Execute each requested tool call in parallel
@@ -498,32 +590,39 @@ export async function chatWithTools(
               delete data._params;
             }
           }
-          return { callId: tc.id, name: tc.function.name, result: JSON.stringify(data ?? result.data) };
+          const payload = data ?? result.data;
+          const resultJson = JSON.stringify(payload);
+          return { callId: tc.id, name: tc.function.name, args, result: resultJson, sql: trace.sql };
         } catch (err) {
           return {
             callId: tc.id,
             name: tc.function.name,
+            args,
             result: JSON.stringify({ error: (err as Error).message }),
+            sql: undefined,
           };
         }
       }),
     );
 
-    // Append tool results back to conversation
+    // Append tool results back to conversation AND capture them for the sidecar + validator
     for (const settled of toolResults) {
       if (settled.status === 'fulfilled') {
-        const { callId, result } = settled.value;
+        const { callId, name, args, result, sql } = settled.value;
         messages.push({
           role: 'tool',
           tool_call_id: callId,
           content: result,
         });
+        toolResultJsonStrings.push(result);
+        newToolResults.push(
+          buildToolResultEntry({ tool: name, args, result: safeParseJson(result), sql }),
+        );
       }
     }
   }
 
   // Exhausted maxToolRounds — force analytics extraction from the model.
-  // Add explicit instruction to parse tool results and return metrics.
   if (toolCallsExecuted > 0) {
     try {
       const analyticsPrompt = isAnalyticalQuery(userMessage)
@@ -534,20 +633,27 @@ export async function chatWithTools(
           'Never use placeholder text or ask for clarification. ' +
           'Extract and compute real values only.';
 
-      messages.push({
-        role: 'user',
-        content: analyticsPrompt,
-      });
+      messages.push({ role: 'user', content: analyticsPrompt });
 
       const summaryResp = await client.chat.completions.create({
-        model: getActiveModel(),
+        model: modelName,
         messages,
         tool_choice: 'none',
         max_completion_tokens: getActiveMaxTokens(),
       });
       let reply = summaryResp.choices[0]?.message?.content ?? '';
       reply = validateAndCleanAnalyticsResponse(reply);
-      return { reply, toolCallsExecuted, toolCallsTrace, messages };
+      const { reply: finalReply, validation } = await validateOrAbstain(reply);
+      return {
+        reply: finalReply,
+        toolCallsExecuted,
+        toolCallsTrace,
+        messages,
+        newToolResults,
+        tier,
+        modelUsed: modelName,
+        validation,
+      };
     } catch {
       // fall through to empty reply
     }
@@ -562,5 +668,21 @@ export async function chatWithTools(
       ? String(lastAssistantMsg.content ?? '')
       : '';
 
-  return { reply: lastContent, toolCallsExecuted, toolCallsTrace, messages };
+  const { reply: finalReply, validation } = await validateOrAbstain(lastContent);
+  return {
+    reply: finalReply,
+    toolCallsExecuted,
+    toolCallsTrace,
+    messages,
+    newToolResults,
+    tier,
+    modelUsed: modelName,
+    validation,
+  };
+}
+
+// ─── Local helpers ───────────────────────────────────────────────────────────
+
+function safeParseJson(s: string): unknown {
+  try { return JSON.parse(s); } catch { return s; }
 }

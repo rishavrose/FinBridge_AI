@@ -39,7 +39,17 @@ import {
   getConversationContext,
   appendToContextCache,
   isContextualMessage,
+  isLiveAnalyticsQuery,
 } from '../../ai/conversation/context-manager.js';
+import {
+  getConversationState,
+  saveConversationState,
+  deriveStateUpdates,
+} from '../../ai/conversation/state-engine.js';
+import {
+  getRecentToolResults,
+  appendToolResults,
+} from '../../ai/conversation/tool-results.js';
 import { logger } from '../../utils/logger.js';
 import type { Role } from '../../types/index.js';
 
@@ -110,7 +120,22 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
                 type: 'object',
                 properties: {
                   name: { type: 'string' },
-                  args: { type: 'object' },
+                  args: { type: 'object', additionalProperties: true },
+                  sql: { type: 'string' },
+                  params: { type: 'array', items: {} },
+                },
+              },
+            },
+            modelTier: { type: 'string', enum: ['simple', 'reasoning', 'strict'] },
+            modelUsed: { type: 'string' },
+            grounded: { type: 'boolean' },
+            ungroundedFacts: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  kind: { type: 'string' },
+                  value: { type: 'string' },
                 },
               },
             },
@@ -148,12 +173,21 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       );
     }
 
-    // ── 1a-3. Load context, save user message, and run memory lookup in parallel ─
-    // These three operations are independent — running them concurrently
-    // shaves 50-200ms off the response time vs. the prior sequential chain.
+    // ── 1a-3. Load context, state, recent tool results, save user message,
+    //         and run memory lookup — all in parallel.
+    // These operations are independent — running them concurrently shaves
+    // 50-200ms off the response time vs. a sequential chain.
     const userMessageId = uuidv4();
-    const [conversationContext, , memoryResultPre] = await Promise.all([
+    const [
+      conversationContext,
+      conversationState,
+      recentToolResults,
+      ,
+      memoryResultPre,
+    ] = await Promise.all([
       getConversationContext(conversationId),
+      getConversationState(conversationId),
+      getRecentToolResults(conversationId),
       executeWrite(
         'INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
         [userMessageId, conversationId, 'user', message],
@@ -164,12 +198,23 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       }),
     ]);
 
-    // If the message contains pronouns or follow-up references ("they", "it",
-    // "why are they failing?", etc.) AND there is prior context to resolve them
-    // against, skip the prompt-hash semantic cache — a cached response for
-    // "failed payouts" is meaningless for the contextual question "why are they
-    // failing?".
-    const skipSemanticCache = conversationContext.length > 0 && isContextualMessage(message);
+    // Cache-bypass policy. Skip the semantic prompt-hash cache when:
+    //   (a) the message references prior turns ("they", "it", "why?") AND
+    //       there IS prior context to resolve against, OR
+    //   (b) the message asks for LIVE analytics ("current success rate", "TPS
+    //       now", "today's failed payouts"). Cached analytics go stale the
+    //       moment the DB ticks forward — see screenshot bug where the first
+    //       answer used cached counts and "recheck" returned fresher counts.
+    const liveAnalytics = isLiveAnalyticsQuery(message);
+    const contextual = conversationContext.length > 0 && isContextualMessage(message);
+    const skipSemanticCache = contextual || liveAnalytics;
+
+    if (liveAnalytics) {
+      logger.info(
+        { userId, conversationId, message: message.slice(0, 120) },
+        'AI chat: live-analytics query — forcing MCP-first (semantic cache bypassed)',
+      );
+    }
 
     const memoryResult = skipSemanticCache || !memoryResultPre
       ? {
@@ -187,6 +232,10 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     let toolCallsExecuted = 0;
     let toolCallsTrace: ToolCallTrace[] = [];
     let cacheSource: 'redis' | 'qdrant' | 'openai' = 'openai';
+    let modelTier: 'simple' | 'reasoning' | 'strict' | undefined;
+    let modelUsed: string | undefined;
+    let grounded: boolean | undefined;
+    let ungroundedFacts: Array<{ kind: string; value: string }> = [];
 
     const cachedResponse = memoryResult.hit && memoryResult.response
       ? (memoryResult.responseType === 'validated'
@@ -225,6 +274,8 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         userMessage: message,
         systemPrompt,
         conversationHistory: conversationContext,
+        conversationState,
+        recentToolResults,
         callerId: userId,
         callerRole,
         callerName: request.user.name,
@@ -234,6 +285,21 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       toolCallsExecuted = chatResult.toolCallsExecuted;
       toolCallsTrace = chatResult.toolCallsTrace;
       cacheSource = 'openai';
+      modelTier = chatResult.tier;
+      modelUsed = chatResult.modelUsed;
+      grounded = chatResult.validation?.grounded;
+      ungroundedFacts = (chatResult.validation?.unsupported ?? []).map((u) => ({
+        kind: u.kind,
+        value: u.value,
+      }));
+
+      // ── Persist tool-result sidecar + advance conversation state ──────────
+      // Fire-and-forget — non-blocking. Both writes are Redis-only with TTL.
+      if (chatResult.newToolResults.length > 0) {
+        appendToolResults(conversationId, chatResult.newToolResults).catch(() => {});
+      }
+      const nextState = deriveStateUpdates(conversationState, message, toolCallsTrace);
+      saveConversationState(conversationId, nextState).catch(() => {});
 
       // Structured query audit log — used for customer behavior analysis
       if (toolCallsTrace.length > 0) {
@@ -241,11 +307,15 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
           event: 'ai.query_log',
           userId,
           conversationId,
+          tier: chatResult.tier,
+          model: chatResult.modelUsed,
           tools: toolCallsTrace.map(t => ({
             tool: t.name,
             args: t.args,
           })),
           toolCount: toolCallsExecuted,
+          grounded: chatResult.validation?.grounded ?? null,
+          ungroundedCount: chatResult.validation?.unsupported.length ?? 0,
           responseMs: Date.now() - startMs,
         }, 'AI tool queries executed');
       }
@@ -341,7 +411,18 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       responseType: memoryResult.responseType,
       responseMs,
       toolCallsExecuted,
-      toolCallsTrace,
+      // toolCallsTrace now carries `sql` + `params` alongside name/args so
+      // the frontend can render the exact query that produced each metric.
+      toolCallsTrace: toolCallsTrace.map((t) => ({
+        name: t.name,
+        args: t.args,
+        ...(t.sql ? { sql: t.sql } : {}),
+        ...(t.params ? { params: t.params } : {}),
+      })),
+      modelTier,
+      modelUsed,
+      grounded,
+      ungroundedFacts,
     });
   });
 
