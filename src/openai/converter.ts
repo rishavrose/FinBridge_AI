@@ -396,9 +396,18 @@ export async function chatWithTools(
     timestamp: new Date(),
   };
 
+  // NVIDIA NIM (and some other providers) reject a second system message
+  // anywhere except position 0. Convert any stray system roles in the prior
+  // history to user-role context lines so the request stays compatible.
+  const sanitizedHistory: ChatCompletionMessageParam[] = conversationHistory.map((m) =>
+    m.role === 'system'
+      ? { role: 'user' as const, content: `[Context] ${typeof m.content === 'string' ? m.content : ''}` }
+      : m,
+  );
+
   const messages: ChatCompletionMessageParam[] = [
     { role: 'system', content: systemPrompt },
-    ...conversationHistory,
+    ...sanitizedHistory,
     { role: 'user', content: userMessage },
   ];
 

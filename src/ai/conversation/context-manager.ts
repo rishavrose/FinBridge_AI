@@ -248,8 +248,8 @@ async function compressHistory(
     if (summary) {
       return [
         {
-          role: 'system',
-          content: `[Earlier conversation summary: ${summary}]`,
+          role: 'user',
+          content: `[Earlier conversation summary for context: ${summary}]`,
         },
         ...recent,
       ];
