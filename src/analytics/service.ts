@@ -203,8 +203,7 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
       const sql = `
         SELECT
           p.bank_id                                              AS bank_id,
-          b.bank_name                                            AS bank_name,
-          b.bank_code                                            AS bank_code,
+          b.name                                                 AS bank_name,
           COUNT(*)                                               AS total_requests,
           SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END)  AS success_count,
           SUM(CASE WHEN p.status IN (4, '4') THEN 1 ELSE 0 END)  AS failed_count,
@@ -222,14 +221,13 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
         LEFT JOIN tbl_bank_lists b ON b.id = p.bank_id
         WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
           AND p.bank_id IS NOT NULL
-        GROUP BY p.bank_id, b.bank_name, b.bank_code
+        GROUP BY p.bank_id, b.name
         ORDER BY (SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) ASC
         LIMIT 50`;
 
       const rows = await executeOnConnection<{
         bank_id: string | number;
         bank_name: string | null;
-        bank_code: string | null;
         total_requests: string;
         success_count: string;
         failed_count: string;
@@ -245,7 +243,7 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
         const status = rate >= 95 ? 'up' : rate >= 80 ? 'degraded' : 'down';
 
         return {
-          bankCode: r.bank_code ?? String(r.bank_id),
+          bankCode: String(r.bank_id),
           bankName: r.bank_name,
           status,
           successRate: Math.round(rate * 10) / 10,
