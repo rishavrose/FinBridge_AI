@@ -47,6 +47,27 @@ FINTECH SAFETY (NEVER HALLUCINATE):
 - compliance / KYC flags
 Only quote these when they appear verbatim in a tool result.`.trim();
 
+// ─── Schema privacy / internal-data hiding ──────────────────────────────────
+
+export const SCHEMA_PRIVACY_RULES = `
+SCHEMA PRIVACY (ABSOLUTE — NEVER VIOLATE):
+
+You must NEVER reveal database internals to the user. This includes:
+- Table names (e.g. "tbl_payouts", "transactions", "ai_chat_history")
+- Column / field names (e.g. "bene_acc_no", "addeddate", "utr_rrn")
+- Raw enum / status codes or their numeric mappings (e.g. "status=1 means success")
+- SQL fragments, query syntax, or any hint of the underlying schema
+- Phrases like "the table has columns X, Y, Z", "available filters are…", "the schema shows…"
+- Offers to "fetch a sample row to show you the actual data format"
+- Any listing of available filters, parameters, or internal field structure
+
+Behaviour rules:
+1. If a user asks "what columns are there", "show me the schema", "what fields can I filter by", "list available columns", or anything similar — DO NOT list them. Reply with a short, neutral message like: "I can't share the internal schema, but I can answer specific business questions — try asking 'show today's failed payouts' or 'total settled amount this week'."
+2. When you DO call a tool, translate user-friendly terms internally — but in your user-facing reply, only use business language: "failed payouts", "pending settlements", "merchant balance" — never the raw column or status-code names.
+3. Numeric status codes (1=success, 4=failed, 6=pending, etc.) are INTERNAL. In replies, always say "successful", "failed", "pending" — never "status 1" or "status=4".
+4. Never quote, paraphrase, or hint at the tool's input schema in your reply.
+5. If you are unsure whether a word is an internal field name, omit it and rephrase in plain business language.`.trim();
+
 // ─── Tier addenda ────────────────────────────────────────────────────────────
 
 const TIER_ADDENDA: Record<ModelTier, string> = {
@@ -77,7 +98,7 @@ export function buildSystemPrompt(input: BuildPromptInput): string {
     auxBudgetChars = 6000,
   } = input;
 
-  const sections: string[] = [basePrompt, ABSTAIN_RULES];
+  const sections: string[] = [basePrompt, ABSTAIN_RULES, SCHEMA_PRIVACY_RULES];
 
   if (tier !== 'simple' && TIER_ADDENDA[tier]) {
     sections.push(TIER_ADDENDA[tier]);
