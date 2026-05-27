@@ -522,7 +522,7 @@ export async function generateToolsForConnection(id: string, selectedTables?: st
           const aggParams = conditions.map((c) => c.value);
           const aggSql = `SELECT ${selectParts.join(', ')} FROM \`${table.name}\` ${whereClause}`;
           const [aggRows] = await pool.execute<mysql.RowDataPacket[]>(aggSql, aggParams as mysql.ExecuteValues);
-          return { result: aggRows[0] ?? {}, table: table.name };
+          return { result: aggRows[0] ?? {}, table: table.name, _sql: aggSql, _params: aggParams };
         }
 
         const { sql, params } = buildSelectQuery({
@@ -535,7 +535,7 @@ export async function generateToolsForConnection(id: string, selectedTables?: st
         });
 
         const [rows] = await pool.execute<mysql.RowDataPacket[]>(sql, params as mysql.ExecuteValues);
-        return { rows, total: rows.length, table: table.name };
+        return { rows, total: rows.length, table: table.name, _sql: sql, _params: params };
       },
     );
 
