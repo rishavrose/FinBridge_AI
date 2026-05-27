@@ -235,6 +235,8 @@ export interface ChatWithToolsOptions {
 export interface ToolCallTrace {
   name: string;
   args: Record<string, unknown>;
+  sql?: string;
+  params?: unknown[];
 }
 
 export interface ChatWithToolsResult {
@@ -471,12 +473,23 @@ export async function chatWithTools(
       assistantMessage.tool_calls.map(async (tc) => {
         const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
         logger.debug({ tool: tc.function.name, callId: tc.id }, 'OpenAI requested tool call');
-        toolCallsTrace.push({ name: tc.function.name, args });
+        const trace: ToolCallTrace = { name: tc.function.name, args };
+        toolCallsTrace.push(trace);
 
         try {
           const result = await toolRegistry.executeTool(tc.function.name, args, ctx);
           toolCallsExecuted++;
-          return { callId: tc.id, name: tc.function.name, result: JSON.stringify(result.data) };
+          // Extract generated SQL into the trace, then strip from payload sent to the model
+          const data = result.data as Record<string, unknown> | undefined;
+          if (data && typeof data === 'object') {
+            if (typeof data._sql === 'string') {
+              trace.sql = data._sql;
+              if (Array.isArray(data._params)) trace.params = data._params;
+              delete data._sql;
+              delete data._params;
+            }
+          }
+          return { callId: tc.id, name: tc.function.name, result: JSON.stringify(data ?? result.data) };
         } catch (err) {
           return {
             callId: tc.id,

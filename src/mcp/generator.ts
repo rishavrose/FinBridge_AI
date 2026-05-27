@@ -161,7 +161,7 @@ function createTableHandler(table: TableInfo) {
       const aggParams = conditions.map((c) => c.value);
       const aggSql = `SELECT ${selectParts.join(', ')} FROM \`${table.name}\` ${whereClause}`;
       const aggRows = await executeSelect<Record<string, number>>(aggSql, aggParams);
-      return { result: aggRows[0] ?? {}, table: table.name };
+      return { result: aggRows[0] ?? {}, table: table.name, _sql: aggSql, _params: aggParams };
     }
 
     const { sql, params } = buildSelectQuery({
@@ -174,7 +174,7 @@ function createTableHandler(table: TableInfo) {
     });
 
     const rows = await executeSelect(sql, params);
-    return { rows, total: rows.length, table: table.name };
+    return { rows, total: rows.length, table: table.name, _sql: sql, _params: params };
   };
 }
 

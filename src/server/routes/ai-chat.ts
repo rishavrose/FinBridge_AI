@@ -148,10 +148,21 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       );
     }
 
-    // ── 1a. Load conversation context (BEFORE saving current message) ─────────
-    // Fetches prior turns from Redis (L1) or MySQL (L2) so the context does
-    // not include the message being processed now.
-    const conversationContext = await getConversationContext(conversationId);
+    // ── 1a-3. Load context, save user message, and run memory lookup in parallel ─
+    // These three operations are independent — running them concurrently
+    // shaves 50-200ms off the response time vs. the prior sequential chain.
+    const userMessageId = uuidv4();
+    const [conversationContext, , memoryResultPre] = await Promise.all([
+      getConversationContext(conversationId),
+      executeWrite(
+        'INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
+        [userMessageId, conversationId, 'user', message],
+      ),
+      queryMemory(message).catch((err) => {
+        logger.warn({ err }, 'queryMemory failed — treating as cache miss');
+        return null;
+      }),
+    ]);
 
     // If the message contains pronouns or follow-up references ("they", "it",
     // "why are they failing?", etc.) AND there is prior context to resolve them
@@ -160,15 +171,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     // failing?".
     const skipSemanticCache = conversationContext.length > 0 && isContextualMessage(message);
 
-    // ── 2. Save the user message ──────────────────────────────────────────────
-    const userMessageId = uuidv4();
-    await executeWrite(
-      'INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
-      [userMessageId, conversationId, 'user', message],
-    );
-
-    // ── 3. AI Memory lookup ───────────────────────────────────────────────────
-    const memoryResult = skipSemanticCache
+    const memoryResult = skipSemanticCache || !memoryResultPre
       ? {
           hit: false as const,
           source: 'none' as const,
@@ -178,7 +181,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
           intentCategory: 'general_inquiry',
           lookupMs: 0,
         }
-      : await queryMemory(message);
+      : memoryResultPre;
 
     let reply_text: string;
     let toolCallsExecuted = 0;
@@ -284,20 +287,24 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     // conversation gets an L1 cache hit and skips the MySQL round-trip.
     appendToContextCache(conversationId, message, reply_text).catch(() => {});
 
-    // ── 4. Save AI response to chat_messages ──────────────────────────────────
+    // ── 4-5. Persist assistant message + bump conversation timestamp in parallel ─
     const assistantMessageId = uuidv4();
-    await executeWrite(
-      'INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
-      [assistantMessageId, conversationId, 'assistant', reply_text],
-    );
-
-    // ── 5. Update conversation timestamp ─────────────────────────────────────
-    await executeWrite(
-      'UPDATE chat_conversations SET updated_at = NOW() WHERE id = ?',
-      [conversationId],
-    );
+    const persistPromise = Promise.all([
+      executeWrite(
+        'INSERT INTO chat_messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
+        [assistantMessageId, conversationId, 'assistant', reply_text],
+      ),
+      executeWrite(
+        'UPDATE chat_conversations SET updated_at = NOW() WHERE id = ?',
+        [conversationId],
+      ),
+    ]);
 
     // ── 6. Record analytics (fire-and-forget) ─────────────────────────────────
+    const sqlQueries = toolCallsTrace
+      .filter((t) => t.sql)
+      .map((t) => ({ name: t.name, sql: t.sql, params: t.params }));
+
     recordCacheLog({
       promptHash: memoryResult.promptHash,
       cacheSource,
@@ -318,7 +325,11 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       confidenceScore: memoryResult.confidence ?? null,
       responseMs,
       toolCallsCount: toolCallsExecuted,
+      sqlQueries,
     }).catch(() => {});
+
+    // Wait for the assistant-message write so the response is consistent.
+    await persistPromise;
 
     return reply.status(200).send({
       reply: reply_text,
@@ -389,7 +400,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
   }, async (request, reply) => {
     const limit = Math.min(parseInt(request.query.limit ?? '100', 10) || 100, 500);
     const rows = await executeSelect(
-      `SELECT id, user_id, original_prompt, cache_hit, cache_source, confidence_score, response_ms, tool_calls_count, created_at
+      `SELECT id, user_id, original_prompt, response, cache_hit, cache_source, confidence_score, response_ms, tool_calls_count, sql_queries, created_at
        FROM ai_chat_history
        ORDER BY created_at DESC
        LIMIT ${limit}`,

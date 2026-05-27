@@ -205,6 +205,7 @@ CREATE TABLE IF NOT EXISTS ai_chat_history (
   confidence_score  DECIMAL(4,3),
   response_ms       INT          NOT NULL DEFAULT 0,
   tool_calls_count  INT          NOT NULL DEFAULT 0,
+  sql_queries       JSON         NULL,
   created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_ach_user_id      (user_id),
   INDEX idx_ach_prompt_hash  (prompt_hash),

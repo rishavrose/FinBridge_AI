@@ -9,8 +9,35 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { executeWrite } from '../../database/client.js';
+import { executeWrite, executeSelect } from '../../database/client.js';
 import { logger } from '../../utils/logger.js';
+
+// ─── One-time column migration ────────────────────────────────────────────────
+// Older deployments may not have `sql_queries` on ai_chat_history. Add it
+// idempotently on the first write so manual migration isn't required.
+
+let _sqlColumnEnsured = false;
+async function ensureSqlQueriesColumn(): Promise<void> {
+  if (_sqlColumnEnsured) return;
+  _sqlColumnEnsured = true;
+  try {
+    const rows = await executeSelect<{ COLUMN_NAME: string }>(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'ai_chat_history'
+         AND COLUMN_NAME = 'sql_queries'`,
+      [],
+    );
+    if (rows.length === 0) {
+      await executeWrite(
+        'ALTER TABLE ai_chat_history ADD COLUMN sql_queries JSON NULL AFTER tool_calls_count',
+      );
+      logger.info('Added sql_queries column to ai_chat_history');
+    }
+  } catch (err) {
+    logger.warn({ err }, 'ensureSqlQueriesColumn check failed');
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -108,13 +135,21 @@ export async function recordChatHistory(opts: {
   confidenceScore: number | null;
   responseMs: number;
   toolCallsCount: number;
+  sqlQueries?: Array<{ name: string; sql?: string; params?: unknown[] }>;
 }): Promise<void> {
+  const sqlJson = opts.sqlQueries && opts.sqlQueries.length > 0
+    ? JSON.stringify(opts.sqlQueries)
+    : null;
+
+  // Lazily migrate the column on first write (no-op once cached).
+  ensureSqlQueriesColumn().catch(() => {});
+
   executeWrite(
     `INSERT INTO ai_chat_history
        (id, user_id, conversation_id, original_prompt, normalized_prompt,
         prompt_hash, response, cache_hit, cache_source, confidence_score,
-        response_ms, tool_calls_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        response_ms, tool_calls_count, sql_queries)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       uuidv4(),
       opts.userId,
@@ -128,6 +163,7 @@ export async function recordChatHistory(opts: {
       opts.confidenceScore,
       opts.responseMs,
       opts.toolCallsCount,
+      sqlJson,
     ],
   ).catch((err) => logger.warn({ err }, 'ai_chat_history write failed'));
 }

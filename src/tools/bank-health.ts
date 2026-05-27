@@ -93,5 +93,5 @@ export async function getBankHealthHandler(
     };
   });
 
-  return { banks: annotated, count: annotated.length };
+  return { banks: annotated, count: annotated.length, _sql: sql, _params: params };
 }
