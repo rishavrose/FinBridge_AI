@@ -64,6 +64,22 @@ function normalizeStatus(status: string): string {
   return map[status] ?? status;
 }
 
+// ─── Tenant DB resolver (cached) ─────────────────────────────────────────────
+// All analytics endpoints prefer the tenant database (tbl_payouts + tbl_bank_lists).
+// Scanning information_schema across every connection is expensive, so we cache
+// the resolved connection ID in memory for 60s.
+
+let _tenantConnId: string | null = null;
+let _tenantConnExpiry = 0;
+async function getTenantPayoutsConnectionId(): Promise<string | null> {
+  const now = Date.now();
+  if (_tenantConnId && now < _tenantConnExpiry) return _tenantConnId;
+  const id = await findConnectionWithTables(['tbl_payouts', 'tbl_bank_lists']);
+  _tenantConnId = id;
+  _tenantConnExpiry = now + 60_000;
+  return id;
+}
+
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
 /** TPS bucketed by minute for the last N minutes */
@@ -71,20 +87,36 @@ export async function getTpsTimeSeries(minutes = 60): Promise<TpsBucket[]> {
   const { data } = await getOrSet<TpsBucket[]>(
     `analytics:tps:${minutes}`,
     async () => {
-      const rows = await executeSelect<{
-        bucket: string; count: string; success: string; failed: string;
-      }>(
-        `SELECT
-           DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00') AS bucket,
-           COUNT(*)                                       AS count,
-           SUM(CASE WHEN status IN ('1','success','SUCCESS') THEN 1 ELSE 0 END)  AS success,
-           SUM(CASE WHEN status IN ('4','failed','FAILED')   THEN 1 ELSE 0 END)  AS failed
-         FROM transactions
-         WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-         GROUP BY bucket
-         ORDER BY bucket ASC`,
-        [minutes],
-      );
+      const tenantId = await getTenantPayoutsConnectionId();
+      const rows = tenantId
+        ? await executeOnConnection<{
+            bucket: string; count: string; success: string; failed: string;
+          }>(
+            tenantId,
+            `SELECT
+               DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00') AS bucket,
+               COUNT(*)                                       AS count,
+               SUM(CASE WHEN status IN (1, '1') THEN 1 ELSE 0 END) AS success,
+               SUM(CASE WHEN status IN (4, '4') THEN 1 ELSE 0 END) AS failed
+             FROM tbl_payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL ${minutes} MINUTE)
+             GROUP BY bucket
+             ORDER BY bucket ASC`,
+          )
+        : await executeSelect<{
+            bucket: string; count: string; success: string; failed: string;
+          }>(
+            `SELECT
+               DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00') AS bucket,
+               COUNT(*)                                       AS count,
+               SUM(CASE WHEN status IN ('1','success','SUCCESS') THEN 1 ELSE 0 END)  AS success,
+               SUM(CASE WHEN status IN ('4','failed','FAILED')   THEN 1 ELSE 0 END)  AS failed
+             FROM transactions
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+             GROUP BY bucket
+             ORDER BY bucket ASC`,
+            [minutes],
+          );
       return rows.map(r => {
         const cnt = Number(r.count);
         const suc = Number(r.success);
@@ -103,16 +135,23 @@ export async function getTpsTimeSeries(minutes = 60): Promise<TpsBucket[]> {
   return data;
 }
 
-/** Current live TPS (transactions in last 60 seconds / 60) */
+/** Current live TPS (payouts in last 60 seconds / 60) */
 export async function getCurrentTps(): Promise<number> {
   const { data } = await getOrSet<number>(
     'analytics:tps:live',
     async () => {
-      const rows = await executeSelect<{ cnt: string }>(
-        `SELECT COUNT(*) AS cnt FROM transactions
-         WHERE created_at >= DATE_SUB(NOW(), INTERVAL 60 SECOND)`,
-        [],
-      );
+      const tenantId = await getTenantPayoutsConnectionId();
+      const rows = tenantId
+        ? await executeOnConnection<{ cnt: string }>(
+            tenantId,
+            `SELECT COUNT(*) AS cnt FROM tbl_payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 60 SECOND)`,
+          )
+        : await executeSelect<{ cnt: string }>(
+            `SELECT COUNT(*) AS cnt FROM transactions
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 60 SECOND)`,
+            [],
+          );
       return Math.round((Number(rows[0]?.cnt ?? 0) / 60) * 100) / 100;
     },
     { ttl: 10 },
@@ -125,18 +164,30 @@ export async function getPayoutAnalytics(): Promise<PayoutStat[]> {
   const { data } = await getOrSet<PayoutStat[]>(
     'analytics:payouts:24h',
     async () => {
-      const rows = await executeSelect<{
-        status: string; count: string; total_amount: string;
-      }>(
-        `SELECT status, COUNT(*) AS count, COALESCE(SUM(amount),0) AS total_amount
-         FROM payouts
-         WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-         GROUP BY status
-         ORDER BY count DESC`,
-        [],
-      );
+      const tenantId = await getTenantPayoutsConnectionId();
+      const rows = tenantId
+        ? await executeOnConnection<{
+            status: string; count: string; total_amount: string;
+          }>(
+            tenantId,
+            `SELECT status, COUNT(*) AS count, COALESCE(SUM(amount),0) AS total_amount
+             FROM tbl_payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+             GROUP BY status
+             ORDER BY count DESC`,
+          )
+        : await executeSelect<{
+            status: string; count: string; total_amount: string;
+          }>(
+            `SELECT status, COUNT(*) AS count, COALESCE(SUM(amount),0) AS total_amount
+             FROM payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+             GROUP BY status
+             ORDER BY count DESC`,
+            [],
+          );
       return rows.map(r => ({
-        status: normalizeStatus(r.status),
+        status: normalizeStatus(String(r.status)),
         count: Number(r.count),
         totalAmount: Number(r.total_amount),
       }));
@@ -153,20 +204,36 @@ export async function getPayoutTimeSeries(): Promise<
   const { data } = await getOrSet(
     'analytics:payouts:timeseries',
     async () => {
-      const rows = await executeSelect<{
-        bucket: string; success: string; failed: string; pending: string;
-      }>(
-        `SELECT
-           DATE_FORMAT(created_at, '%Y-%m-%dT%H:00:00') AS bucket,
-           SUM(CASE WHEN status IN ('success','1')  THEN 1 ELSE 0 END) AS success,
-           SUM(CASE WHEN status IN ('failed','4')   THEN 1 ELSE 0 END) AS failed,
-           SUM(CASE WHEN status IN ('initiated','2','pending') THEN 1 ELSE 0 END) AS pending
-         FROM payouts
-         WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-         GROUP BY bucket
-         ORDER BY bucket ASC`,
-        [],
-      );
+      const tenantId = await getTenantPayoutsConnectionId();
+      const rows = tenantId
+        ? await executeOnConnection<{
+            bucket: string; success: string; failed: string; pending: string;
+          }>(
+            tenantId,
+            `SELECT
+               DATE_FORMAT(created_at, '%Y-%m-%dT%H:00:00') AS bucket,
+               SUM(CASE WHEN status IN (1, '1') THEN 1 ELSE 0 END) AS success,
+               SUM(CASE WHEN status IN (4, '4') THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN status IN (2, '2', 6, '6') THEN 1 ELSE 0 END) AS pending
+             FROM tbl_payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+             GROUP BY bucket
+             ORDER BY bucket ASC`,
+          )
+        : await executeSelect<{
+            bucket: string; success: string; failed: string; pending: string;
+          }>(
+            `SELECT
+               DATE_FORMAT(created_at, '%Y-%m-%dT%H:00:00') AS bucket,
+               SUM(CASE WHEN status IN ('success','1')  THEN 1 ELSE 0 END) AS success,
+               SUM(CASE WHEN status IN ('failed','4')   THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN status IN ('initiated','2','pending') THEN 1 ELSE 0 END) AS pending
+             FROM payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+             GROUP BY bucket
+             ORDER BY bucket ASC`,
+            [],
+          );
       return rows.map(r => ({
         time: r.bucket,
         success: Number(r.success),
@@ -337,8 +404,15 @@ export async function getRecentPayouts(limit = 8): Promise<RecentPayoutRow[]> {
   return data;
 }
 
-/** Bank health snapshot */
+/** Bank health snapshot — prefers live tbl_payouts data, falls back to bank_health */
 export async function getBankStats(): Promise<BankStat[]> {
+  // Prefer live tenant data when a payouts DB is connected.
+  const tenantId = await getTenantPayoutsConnectionId();
+  if (tenantId) {
+    const live = await getBankStatsFromPayouts();
+    if (live.length > 0) return live;
+  }
+
   const { data } = await getOrSet<BankStat[]>(
     'analytics:banks',
     async () => {
@@ -370,26 +444,43 @@ export async function getBankStats(): Promise<BankStat[]> {
   return data;
 }
 
-/** Top failure reasons from transactions */
+/** Top failure reasons — tenant tbl_payouts.remarks first, falls back to local transactions */
 export async function getFailureAnalysis(): Promise<FailureReason[]> {
   const { data } = await getOrSet<FailureReason[]>(
     'analytics:failures:24h',
     async () => {
-      const rows = await executeSelect<{ reason: string; count: string; total: string }>(
-        `SELECT
-           COALESCE(NULLIF(TRIM(response_message),''), 'Unknown') AS reason,
-           COUNT(*) AS count,
-           (SELECT COUNT(*) FROM transactions
-            WHERE status IN ('4','failed')
-            AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)) AS total
-         FROM transactions
-         WHERE status IN ('4','failed')
-           AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-         GROUP BY reason
-         ORDER BY count DESC
-         LIMIT 8`,
-        [],
-      );
+      const tenantId = await getTenantPayoutsConnectionId();
+      const rows = tenantId
+        ? await executeOnConnection<{ reason: string; count: string; total: string }>(
+            tenantId,
+            `SELECT
+               COALESCE(NULLIF(TRIM(remarks),''), 'Unknown') AS reason,
+               COUNT(*) AS count,
+               (SELECT COUNT(*) FROM tbl_payouts
+                WHERE status IN (4, '4')
+                  AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)) AS total
+             FROM tbl_payouts
+             WHERE status IN (4, '4')
+               AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+             GROUP BY reason
+             ORDER BY count DESC
+             LIMIT 8`,
+          )
+        : await executeSelect<{ reason: string; count: string; total: string }>(
+            `SELECT
+               COALESCE(NULLIF(TRIM(response_message),''), 'Unknown') AS reason,
+               COUNT(*) AS count,
+               (SELECT COUNT(*) FROM transactions
+                WHERE status IN ('4','failed')
+                AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)) AS total
+             FROM transactions
+             WHERE status IN ('4','failed')
+               AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+             GROUP BY reason
+             ORDER BY count DESC
+             LIMIT 8`,
+            [],
+          );
       const totalFailed = Number(rows[0]?.total ?? 1) || 1;
       return rows.map(r => ({
         reason: r.reason,
@@ -407,6 +498,70 @@ export async function getOverviewMetrics(): Promise<OverviewMetrics> {
   const { data } = await getOrSet<OverviewMetrics>(
     'analytics:overview',
     async () => {
+      const tenantId = await getTenantPayoutsConnectionId();
+
+      if (tenantId) {
+        // ── Tenant DB path: every metric derived from tbl_payouts (+ banks) ──
+        const [tpsRows, txRows, payoutRows, bankRows] = await Promise.all([
+          executeOnConnection<{ cnt: string }>(
+            tenantId,
+            `SELECT COUNT(*) AS cnt FROM tbl_payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 60 SECOND)`,
+          ),
+          executeOnConnection<{ total: string; success: string; vol: string }>(
+            tenantId,
+            `SELECT COUNT(*) AS total,
+                    SUM(CASE WHEN status IN (1, '1') THEN 1 ELSE 0 END) AS success,
+                    COALESCE(SUM(amount), 0) AS vol
+             FROM tbl_payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+          ),
+          executeOnConnection<{ failed: string; vol: string }>(
+            tenantId,
+            `SELECT
+               SUM(CASE WHEN status IN (4, '4') AND created_at >= CURDATE() THEN 1 ELSE 0 END) AS failed,
+               COALESCE(SUM(amount), 0) AS vol
+             FROM tbl_payouts
+             WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+          ),
+          executeOnConnection<{ down: string; total: string; avg_ms: string }>(
+            tenantId,
+            // Per-bank success rate over last 24h; "down" = rate < 80%
+            `SELECT
+               SUM(CASE WHEN rate < 80 THEN 1 ELSE 0 END) AS down,
+               COUNT(*) AS total,
+               AVG(avg_ms) AS avg_ms
+             FROM (
+               SELECT
+                 p.bank_id,
+                 (SUM(CASE WHEN p.status IN (1,'1') THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)) * 100 AS rate,
+                 AVG(CASE WHEN p.status IN (1,'1',4,'4')
+                   AND p.updated_at IS NOT NULL AND p.created_at IS NOT NULL
+                   THEN TIMESTAMPDIFF(MICROSECOND, p.created_at, p.updated_at) / 1000
+                   ELSE NULL END) AS avg_ms
+               FROM tbl_payouts p
+               WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                 AND p.bank_id IS NOT NULL
+               GROUP BY p.bank_id
+             ) per_bank`,
+          ),
+        ]);
+
+        const total24h = Number(txRows[0]?.total ?? 0);
+        const success24h = Number(txRows[0]?.success ?? 0);
+        return {
+          currentTps: Math.round((Number(tpsRows[0]?.cnt ?? 0) / 60) * 100) / 100,
+          successRate1h: total24h > 0 ? Math.round((success24h / total24h) * 10000) / 100 : 0,
+          failedPayoutsToday: Number(payoutRows[0]?.failed ?? 0),
+          activeIncidents: 0,
+          totalTransactions24h: total24h,
+          totalPayoutVolume24h: Number(payoutRows[0]?.vol ?? 0),
+          avgResponseMs: Math.round(Number(bankRows[0]?.avg_ms ?? 0)),
+          banksDown: Number(bankRows[0]?.down ?? 0),
+        };
+      }
+
+      // ── Fallback: local seed data ──
       const [tpsRows, txRows, payoutRows, bankRows] = await Promise.all([
         executeSelect<{ cnt: string }>(
           `SELECT COUNT(*) AS cnt FROM transactions
