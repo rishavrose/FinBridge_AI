@@ -290,16 +290,22 @@ export async function getRecentPayouts(limit = 8): Promise<RecentPayoutRow[]> {
         return [];
       }
 
+      // Build the timestamp string in SQL so we don't depend on the driver's
+      // DATE-to-Date conversion (which made `new Date(...)` return NaN in the
+      // frontend). Output format: "YYYY-MM-DDTHH:MM:SS" — parseable everywhere.
       const sql = `
         SELECT
-          p.id              AS id,
-          p.utr_rrn         AS rrn,
-          p.userid          AS user_id,
-          p.amount          AS amount,
-          p.status          AS status,
-          p.addeddate       AS addeddate,
-          p.addedtime       AS addedtime,
-          b.name            AS bank_name
+          p.id        AS id,
+          p.utr_rrn   AS rrn,
+          p.userid    AS user_id,
+          p.amount    AS amount,
+          p.status    AS status,
+          CONCAT(
+            DATE_FORMAT(p.addeddate, '%Y-%m-%d'),
+            'T',
+            IFNULL(p.addedtime, '00:00:00')
+          )           AS created_at,
+          b.name      AS bank_name
         FROM tbl_payouts p
         LEFT JOIN tbl_bank_lists b ON b.id = p.bank_id
         ORDER BY p.id DESC
@@ -311,8 +317,7 @@ export async function getRecentPayouts(limit = 8): Promise<RecentPayoutRow[]> {
         user_id: string | number | null;
         amount: string | number;
         status: string | number;
-        addeddate: string | null;
-        addedtime: string | null;
+        created_at: string | null;
         bank_name: string | null;
       }>(connectionId, sql);
 
@@ -323,12 +328,7 @@ export async function getRecentPayouts(limit = 8): Promise<RecentPayoutRow[]> {
         amount: Number(r.amount ?? 0),
         currency: 'INR',
         status: String(r.status ?? ''),
-        // The dashboard's relativeTime() parses this with new Date(). Combining
-        // addeddate ("YYYY-MM-DD") and addedtime ("HH:MM:SS") gives a valid
-        // ISO-ish string ("YYYY-MM-DD HH:MM:SS") that the browser accepts.
-        created_at: r.addeddate
-          ? `${r.addeddate}${r.addedtime ? ' ' + r.addedtime : ''}`
-          : '',
+        created_at: r.created_at ?? '',
         bank_code: r.bank_name ?? null,
       }));
     },
