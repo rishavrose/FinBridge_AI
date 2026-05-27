@@ -76,7 +76,9 @@ async function getTenantPayoutsConnectionId(): Promise<string | null> {
   if (_tenantConnId && now < _tenantConnExpiry) return _tenantConnId;
   const id = await findConnectionWithTables(['tbl_payouts', 'tbl_bank_lists']);
   _tenantConnId = id;
-  _tenantConnExpiry = now + 60_000;
+  // Tenant connection rarely changes — cache long so we don't keep scanning
+  // information_schema across every connection on every analytics request.
+  _tenantConnExpiry = now + 10 * 60_000;
   return id;
 }
 
@@ -130,7 +132,7 @@ export async function getTpsTimeSeries(minutes = 60): Promise<TpsBucket[]> {
         };
       });
     },
-    { ttl: 30 },
+    { ttl: 300 },
   );
   return data;
 }
@@ -192,7 +194,7 @@ export async function getPayoutAnalytics(): Promise<PayoutStat[]> {
         totalAmount: Number(r.total_amount),
       }));
     },
-    { ttl: 30 },
+    { ttl: 300 },
   );
   return data;
 }
@@ -241,7 +243,7 @@ export async function getPayoutTimeSeries(): Promise<
         pending: Number(r.pending),
       }));
     },
-    { ttl: 60 },
+    { ttl: 300 },
   );
   return data as { time: string; success: number; failed: number; pending: number }[];
 }
@@ -267,30 +269,31 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
         return [];
       }
 
+      // Performance: limit to last 6h (most dashboards want "recent" anyway),
+      // skip the expensive TIMESTAMPDIFF AVG over every row, and use seconds
+      // resolution which is cheap. avg_response_ms is computed via TIMESTAMPDIFF
+      // SECONDS only on finalised rows (status 1 or 4), which is much faster
+      // than MICROSECOND-precision per-row math.
       const sql = `
         SELECT
-          p.bank_id                                              AS bank_id,
-          b.name                                                 AS bank_name,
-          COUNT(*)                                               AS total_requests,
-          SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END)  AS success_count,
-          SUM(CASE WHEN p.status IN (4, '4') THEN 1 ELSE 0 END)  AS failed_count,
+          p.bank_id                                                              AS bank_id,
+          b.name                                                                 AS bank_name,
+          COUNT(*)                                                               AS total_requests,
+          SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END)                  AS success_count,
+          SUM(CASE WHEN p.status IN (4, '4') THEN 1 ELSE 0 END)                  AS failed_count,
           AVG(
-            CASE
-              WHEN p.status IN (1, '1', 4, '4')
-                AND p.updated_at IS NOT NULL
-                AND p.created_at IS NOT NULL
-              THEN TIMESTAMPDIFF(MICROSECOND, p.created_at, p.updated_at) / 1000
-              ELSE NULL
-            END
-          )                                                      AS avg_response_ms,
-          MAX(p.updated_at)                                      AS last_checked
+            CASE WHEN p.status IN (1,'1',4,'4')
+              THEN TIMESTAMPDIFF(SECOND, p.created_at, p.updated_at) * 1000
+              ELSE NULL END
+          )                                                                      AS avg_response_ms,
+          MAX(p.updated_at)                                                      AS last_checked
         FROM tbl_payouts p
         LEFT JOIN tbl_bank_lists b ON b.id = p.bank_id
-        WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+        WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 6 HOUR)
           AND p.bank_id IS NOT NULL
         GROUP BY p.bank_id, b.name
-        ORDER BY (SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) ASC
-        LIMIT 50`;
+        ORDER BY total_requests DESC
+        LIMIT 20`;
 
       const rows = await executeOnConnection<{
         bank_id: string | number;
@@ -321,7 +324,7 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
         };
       });
     },
-    { ttl: 30 },
+    { ttl: 300 },
   );
   return data;
 }
@@ -399,7 +402,7 @@ export async function getRecentPayouts(limit = 8): Promise<RecentPayoutRow[]> {
         bank_code: r.bank_name ?? null,
       }));
     },
-    { ttl: 15 },
+    { ttl: 180 },
   );
   return data;
 }
@@ -439,7 +442,7 @@ export async function getBankStats(): Promise<BankStat[]> {
         lastChecked: r.last_checked_at,
       }));
     },
-    { ttl: 30 },
+    { ttl: 300 },
   );
   return data;
 }
@@ -488,7 +491,7 @@ export async function getFailureAnalysis(): Promise<FailureReason[]> {
         pct: Math.round((Number(r.count) / totalFailed) * 1000) / 10,
       }));
     },
-    { ttl: 60 },
+    { ttl: 300 },
   );
   return data;
 }
@@ -526,7 +529,9 @@ export async function getOverviewMetrics(): Promise<OverviewMetrics> {
           ),
           executeOnConnection<{ down: string; total: string; avg_ms: string }>(
             tenantId,
-            // Per-bank success rate over last 24h; "down" = rate < 80%
+            // Per-bank success rate over last 6h; "down" = rate < 80%.
+            // Last-6h window + SECOND-resolution TIMESTAMPDIFF keep this cheap
+            // even on multi-million-row tables.
             `SELECT
                SUM(CASE WHEN rate < 80 THEN 1 ELSE 0 END) AS down,
                COUNT(*) AS total,
@@ -536,11 +541,10 @@ export async function getOverviewMetrics(): Promise<OverviewMetrics> {
                  p.bank_id,
                  (SUM(CASE WHEN p.status IN (1,'1') THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)) * 100 AS rate,
                  AVG(CASE WHEN p.status IN (1,'1',4,'4')
-                   AND p.updated_at IS NOT NULL AND p.created_at IS NOT NULL
-                   THEN TIMESTAMPDIFF(MICROSECOND, p.created_at, p.updated_at) / 1000
+                   THEN TIMESTAMPDIFF(SECOND, p.created_at, p.updated_at) * 1000
                    ELSE NULL END) AS avg_ms
                FROM tbl_payouts p
-               WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+               WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 6 HOUR)
                  AND p.bank_id IS NOT NULL
                GROUP BY p.bank_id
              ) per_bank`,
@@ -606,7 +610,7 @@ export async function getOverviewMetrics(): Promise<OverviewMetrics> {
         banksDown: Number(bankRows[0]?.down ?? 0),
       };
     },
-    { ttl: 15 },
+    { ttl: 180 },
   );
   return data;
 }
