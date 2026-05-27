@@ -41,10 +41,18 @@ const envSchema = z.object({
   JWT_ISSUER: z.string().default('finbridge-mcp'),
   API_KEY_SALT: z.string().min(16, 'API_KEY_SALT must be at least 16 characters'),
 
+  // AI Provider — switch between 'openai' and 'nvidia'
+  AI_PROVIDER: z.enum(['openai', 'nvidia']).default('openai'),
+
   // OpenAI (optional)
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-4-turbo-preview'),
   OPENAI_MAX_TOKENS: z.string().default('4096').transform(Number),
+
+  // NVIDIA NIM (optional — OpenAI-compatible endpoint)
+  NVIDIA_API_KEY: z.string().optional(),
+  NVIDIA_MODEL: z.string().default('deepseek-ai/deepseek-v4-flash'),
+  NVIDIA_BASE_URL: z.string().default('https://integrate.api.nvidia.com/v1'),
 
   // Cache TTLs (seconds)
   CACHE_TTL_DEFAULT: z.string().default('300').transform(Number),
@@ -104,10 +112,14 @@ if (!result.success) {
 
 const rawEnv = result.data;
 
-// AI Memory requires OpenAI embeddings — disable it automatically when no key is configured.
+// AI Memory requires embeddings — needs at least one AI provider key.
+const hasAiKey = rawEnv.AI_PROVIDER === 'nvidia'
+  ? !!rawEnv.NVIDIA_API_KEY
+  : !!rawEnv.OPENAI_API_KEY;
+
 export const env = {
   ...rawEnv,
-  AI_MEMORY_ENABLED: rawEnv.AI_MEMORY_ENABLED && !!rawEnv.OPENAI_API_KEY,
+  AI_MEMORY_ENABLED: rawEnv.AI_MEMORY_ENABLED && hasAiKey,
 };
 
 export type Env = typeof env;

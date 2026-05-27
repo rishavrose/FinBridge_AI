@@ -67,12 +67,23 @@ export async function healthRoutes(fastify: FastifyInstance): Promise<void> {
   // ── Info endpoint ──
   fastify.get('/health/info', {
     schema: { tags: ['Health'], summary: 'Service info' },
-  }, async () => ({
-    name: env.MCP_SERVER_NAME,
-    version: env.MCP_SERVER_VERSION,
-    environment: env.NODE_ENV,
-    toolCount: toolRegistry.getToolCount(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-  }));
+  }, async () => {
+    const provider = env.AI_PROVIDER;
+    const model = provider === 'nvidia' ? env.NVIDIA_MODEL : env.OPENAI_MODEL;
+    const keyConfigured = provider === 'nvidia' ? !!env.NVIDIA_API_KEY : !!env.OPENAI_API_KEY;
+
+    return {
+      name: env.MCP_SERVER_NAME,
+      version: env.MCP_SERVER_VERSION,
+      environment: env.NODE_ENV,
+      toolCount: toolRegistry.getToolCount(),
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+      ai: {
+        provider,
+        model,
+        keyConfigured,
+      },
+    };
+  });
 }

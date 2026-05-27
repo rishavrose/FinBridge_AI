@@ -6,7 +6,7 @@
  */
 
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions.js';
-import { getOpenAiClient } from './client.js';
+import { getOpenAiClient, getActiveModel, getActiveMaxTokens } from './client.js';
 import { toolRegistry } from '../mcp/registry.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
@@ -372,8 +372,10 @@ export async function chatWithTools(
     maxToolRounds = 10,
   } = opts;
 
-  if (!env.OPENAI_API_KEY) {
-    const err = new Error('AI chat requires OPENAI_API_KEY — add it to your .env file');
+  const activeKey = env.AI_PROVIDER === 'nvidia' ? env.NVIDIA_API_KEY : env.OPENAI_API_KEY;
+  if (!activeKey) {
+    const keyName = env.AI_PROVIDER === 'nvidia' ? 'NVIDIA_API_KEY' : 'OPENAI_API_KEY';
+    const err = new Error(`AI chat requires ${keyName} — add it to your .env file`);
     (err as NodeJS.ErrnoException & { statusCode?: number }).statusCode = 503;
     throw err;
   }
@@ -403,11 +405,11 @@ export async function chatWithTools(
 
   for (let round = 0; round < maxToolRounds; round++) {
     const response = await client.chat.completions.create({
-      model: env.OPENAI_MODEL,
+      model: getActiveModel(),
       messages,
       tools: functions.map((f) => ({ type: 'function' as const, function: f })),
       tool_choice: 'auto',
-      max_completion_tokens: env.OPENAI_MAX_TOKENS,
+      max_completion_tokens: getActiveMaxTokens(),
     });
 
     const choice = response.choices[0];
@@ -445,9 +447,9 @@ export async function chatWithTools(
           });
 
           const summaryResp = await client.chat.completions.create({
-            model: env.OPENAI_MODEL,
+            model: getActiveModel(),
             messages,
-            max_completion_tokens: env.OPENAI_MAX_TOKENS,
+            max_completion_tokens: getActiveMaxTokens(),
           });
           reply = summaryResp.choices[0]?.message?.content ?? '';
 
@@ -516,10 +518,10 @@ export async function chatWithTools(
       });
 
       const summaryResp = await client.chat.completions.create({
-        model: env.OPENAI_MODEL,
+        model: getActiveModel(),
         messages,
         tool_choice: 'none',
-        max_completion_tokens: env.OPENAI_MAX_TOKENS,
+        max_completion_tokens: getActiveMaxTokens(),
       });
       let reply = summaryResp.choices[0]?.message?.content ?? '';
       reply = validateAndCleanAnalyticsResponse(reply);

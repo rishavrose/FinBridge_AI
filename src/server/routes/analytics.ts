@@ -6,13 +6,12 @@ import {
   getCurrentTps,
 } from '../../analytics/service.js';
 import { getSocketIO, getConnectedClients } from '../../realtime/socket.js';
-import { env } from '../../config/env.js';
 
-// Optional OpenAI insight generation
+// Optional AI insight generation
 async function generateInsight(metrics: Awaited<ReturnType<typeof getOverviewMetrics>>, banks: Awaited<ReturnType<typeof getBankStats>>): Promise<string> {
   try {
-    const { default: OpenAI } = await import('openai');
-    const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+    const { getOpenAiClient, getActiveModel } = await import('../../openai/client.js');
+    const openai = getOpenAiClient();
 
     const banksDown = banks.filter(b => b.status !== 'up' && b.status !== 'active');
     const slowBanks = banks.filter(b => b.avgResponseMs > 1500);
@@ -31,7 +30,7 @@ Metrics:
 Provide exactly 3 bullet points (starting with •) covering: system health assessment, key risk, and recommended action. Be specific and concise.`;
 
     const res = await openai.chat.completions.create({
-      model: env.OPENAI_MODEL ?? 'gpt-4-turbo-preview',
+      model: getActiveModel(),
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 300,
       temperature: 0.3,

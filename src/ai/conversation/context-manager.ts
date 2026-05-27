@@ -20,7 +20,7 @@
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions.js';
 import { getRedisClient } from '../../cache/client.js';
 import { executeSelect } from '../../database/client.js';
-import { getOpenAiClient } from '../../openai/client.js';
+import { getOpenAiClient, getActiveModel } from '../../openai/client.js';
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
 
@@ -229,7 +229,7 @@ async function compressHistory(
       .join('\n');
 
     const summaryResp = await client.chat.completions.create({
-      model: env.OPENAI_MODEL,
+      model: getActiveModel(),
       messages: [
         {
           role: 'system',
