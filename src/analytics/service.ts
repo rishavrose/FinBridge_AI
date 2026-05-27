@@ -4,7 +4,9 @@
  */
 
 import { executeSelect } from '../database/client.js';
+import { executeOnConnection, findConnectionWithTables } from '../database/connection-manager.js';
 import { getOrSet } from '../cache/manager.js';
+import { logger } from '../utils/logger.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -190,7 +192,41 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
   const { data } = await getOrSet<BankStat[]>(
     'analytics:banks:from-payouts',
     async () => {
-      const rows = await executeSelect<{
+      // The payouts data lives in a tenant DB exposed via the dynamic
+      // connection manager — NOT in finbridge_db. Locate the right pool.
+      const connectionId = await findConnectionWithTables(['tbl_payouts', 'tbl_bank_lists']);
+      if (!connectionId) {
+        logger.warn('getBankStatsFromPayouts: no connection has tbl_payouts + tbl_bank_lists');
+        return [];
+      }
+
+      const sql = `
+        SELECT
+          p.bank_id                                              AS bank_id,
+          b.bank_name                                            AS bank_name,
+          b.bank_code                                            AS bank_code,
+          COUNT(*)                                               AS total_requests,
+          SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END)  AS success_count,
+          SUM(CASE WHEN p.status IN (4, '4') THEN 1 ELSE 0 END)  AS failed_count,
+          AVG(
+            CASE
+              WHEN p.status IN (1, '1', 4, '4')
+                AND p.updated_at IS NOT NULL
+                AND p.created_at IS NOT NULL
+              THEN TIMESTAMPDIFF(MICROSECOND, p.created_at, p.updated_at) / 1000
+              ELSE NULL
+            END
+          )                                                      AS avg_response_ms,
+          MAX(p.updated_at)                                      AS last_checked
+        FROM tbl_payouts p
+        LEFT JOIN tbl_bank_lists b ON b.id = p.bank_id
+        WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+          AND p.bank_id IS NOT NULL
+        GROUP BY p.bank_id, b.bank_name, b.bank_code
+        ORDER BY (SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) ASC
+        LIMIT 50`;
+
+      const rows = await executeOnConnection<{
         bank_id: string | number;
         bank_name: string | null;
         bank_code: string | null;
@@ -199,33 +235,7 @@ export async function getBankStatsFromPayouts(): Promise<BankStat[]> {
         failed_count: string;
         avg_response_ms: string | null;
         last_checked: string | null;
-      }>(
-        `SELECT
-           p.bank_id                                         AS bank_id,
-           b.bank_name                                       AS bank_name,
-           b.bank_code                                       AS bank_code,
-           COUNT(*)                                          AS total_requests,
-           SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END) AS success_count,
-           SUM(CASE WHEN p.status IN (4, '4') THEN 1 ELSE 0 END) AS failed_count,
-           AVG(
-             CASE
-               WHEN p.status IN (1, '1', 4, '4')
-                 AND p.updated_at IS NOT NULL
-                 AND p.created_at IS NOT NULL
-               THEN TIMESTAMPDIFF(MICROSECOND, p.created_at, p.updated_at) / 1000
-               ELSE NULL
-             END
-           )                                                 AS avg_response_ms,
-           MAX(p.updated_at)                                 AS last_checked
-         FROM tbl_payouts p
-         LEFT JOIN tbl_bank_lists b ON b.id = p.bank_id
-         WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-           AND p.bank_id IS NOT NULL
-         GROUP BY p.bank_id, b.bank_name, b.bank_code
-         ORDER BY (SUM(CASE WHEN p.status IN (1, '1') THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) ASC
-         LIMIT 50`,
-        [],
-      );
+      }>(connectionId, sql);
 
       return rows.map((r) => {
         const total = Number(r.total_requests ?? 0);

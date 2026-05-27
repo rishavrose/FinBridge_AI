@@ -149,6 +149,55 @@ function getOrCreatePool(id: string, config: DbConnectionConfig): mysql.Pool {
   return pool;
 }
 
+/**
+ * Run a query against a specific dynamic connection's pool.
+ * Throws if the connection ID isn't registered.
+ */
+export async function executeOnConnection<T = Record<string, unknown>>(
+  connectionId: string,
+  sql: string,
+  params: unknown[] = [],
+): Promise<T[]> {
+  const config = await getStoredConnection(connectionId);
+  if (!config) {
+    throw new Error(`Connection ${connectionId} is not registered`);
+  }
+  const pool = getOrCreatePool(connectionId, config);
+  const [rows] = await pool.execute<mysql.RowDataPacket[]>(sql, params as mysql.ExecuteValues);
+  return rows as T[];
+}
+
+/**
+ * Find the first registered connection whose database contains BOTH of the
+ * given tables. Returns null if no connection has them.
+ * Used by analytics widgets that need to find the right tenant DB for
+ * cross-table joins like tbl_payouts × tbl_bank_lists.
+ */
+export async function findConnectionWithTables(
+  tables: string[],
+): Promise<string | null> {
+  const conns = await listStoredConnections();
+  for (const meta of conns) {
+    try {
+      const config = await getStoredConnection(meta.id);
+      if (!config) continue;
+      const pool = getOrCreatePool(meta.id, config);
+      const placeholders = tables.map(() => '?').join(',');
+      const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema = DATABASE() AND table_name IN (${placeholders})`,
+        tables,
+      );
+      const found = new Set(rows.map((r) => String(r.table_name ?? r.TABLE_NAME).toLowerCase()));
+      const wanted = tables.map((t) => t.toLowerCase());
+      if (wanted.every((t) => found.has(t))) return meta.id;
+    } catch {
+      // Skip unreachable connections and keep scanning
+    }
+  }
+  return null;
+}
+
 export async function releasePool(id: string): Promise<void> {
   const pool = poolRegistry.get(id);
   if (pool) {
