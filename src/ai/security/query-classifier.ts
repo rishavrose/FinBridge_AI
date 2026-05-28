@@ -24,6 +24,7 @@ export interface ClassifyResult {
     | 'tool_discovery'
     | 'bulk_export'
     | 'operational_fishing'
+    | 'out_of_domain'
     | 'general';
 }
 
@@ -86,6 +87,59 @@ const BULK_EXPORT_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Out-of-domain queries: e-commerce, logistics, entertainment, general
+ * knowledge, travel, recipes, social media — anything that is clearly NOT
+ * fintech/payment related.
+ *
+ * Keep these HIGH-CONFIDENCE only. Patterns must not fire on legitimate
+ * fintech questions. Use negative lookahead for terms that dual-appear in
+ * payment context (e.g. "Amazon Pay", "Swiggy payment").
+ */
+const OUT_OF_DOMAIN_PATTERNS: RegExp[] = [
+  // E-commerce platforms (only when NOT followed by pay/payment/gateway)
+  /\b(shopify|flipkart|meesho|myntra|snapdeal|nykaa|bigcommerce|woocommerce|magento)\b/i,
+  /\b(online\s+store|ecommerce\s+platform|shopping\s+(website|portal|app|cart))\b/i,
+
+  // Logistics / courier / delivery companies (non-payment context)
+  /\b(delhivery|bluedart|dtdc|shadowfax|xpressbees|ecomexpress|shiprocket)\b/i,
+  /\b(logistics\s+(company|companies|firm|provider|partner|industry))\b/i,
+  /\b(courier\s+(service|company|partner|rates?))\b/i,
+
+  // Entertainment — movies, cricket scores, music
+  /\b(movie\s+review|film\s+recommend|bollywood\s+(movie|actor|actress)|netflix\s+show|web\s+series\s+recommend)\b/i,
+  /\b(ipl\s+(score|match|result|team|player)|cricket\s+(score|result|match|highlights))\b/i,
+  /\b(song\s+recommend|playlist|album\s+release|music\s+artist)\b/i,
+
+  // Recipes / food (not food-delivery payment)
+  /\b(recipe\s+for|how\s+to\s+(cook|make|prepare|bake)\s+(?!payment|report|invoice))\b/i,
+  /\b(ingredients\s+(for|of)|cooking\s+(time|method|tips))\b/i,
+
+  // Travel bookings (not payment/refund related)
+  /\b(hotel\s+booking|flight\s+(booking|search|deal)|train\s+ticket\s+(booking|price)|tour\s+package|holiday\s+package|travel\s+itinerary)\b/i,
+  /\b(best\s+(hotel|resort|destination|tourist\s+place)\s+in)\b/i,
+
+  // Medical / health advice
+  /\b(medicine\s+for|dosage\s+of|symptoms\s+of|treatment\s+for|home\s+remedy\s+for)\b/i,
+  /\b(which\s+doctor|which\s+hospital|medical\s+advice|health\s+tips)\b/i,
+
+  // Social media strategies / digital marketing
+  /\b(social\s+media\s+(marketing|strategy|campaign|post|follower)|seo\s+(strategy|tips|tools)|content\s+marketing|digital\s+marketing\s+(strategy|agency))\b/i,
+
+  // Generic general-knowledge questions
+  /\b(capital\s+of\s+[a-z]+|what\s+is\s+the\s+(population|area)\s+of|who\s+(is|was)\s+the\s+(prime\s+minister|president|king|ceo\s+of(?!\s+(payment|bank|fintech))))\b/i,
+  /\b(history\s+of\s+(?!payment|upi|banking|fintech)|origin\s+of\s+(?!payment|upi|banking)|biography\s+of)\b/i,
+  /\b(when\s+was\s+.{1,30}\s+(born|invented|discovered|founded)\b)/i,
+
+  // Weather
+  /\b(weather\s+(in|for|today|tomorrow|forecast)|temperature\s+in\s+[a-z]+|will\s+it\s+rain)\b/i,
+
+  // Hinglish / Hindi out-of-domain
+  /\b(kon\s+si\s+(website|company|app|brand)|kaun\s+si\s+(website|company|app|brand))\b/i,
+  /\b(kaise\s+(banaye|banta|milta|milti|hota|hoti))\b/i,
+  /\b(logistics\s+ki\s+company|delivery\s+ki\s+company|ecommerce\s+ki\s+website)\b/i,
+];
+
+/**
  * Operational-intelligence fishing: probing weak banks, downtime windows,
  * exploit-adjacent reconnaissance.
  */
@@ -111,6 +165,13 @@ function matchAny(message: string, patterns: RegExp[]): boolean {
  */
 export function classifyQuery(message: string): ClassifyResult {
   const reasons: string[] = [];
+
+  // Out-of-domain check runs first — no point scoring security risk on a
+  // query that's simply about cooking or cricket.
+  if (matchAny(message, OUT_OF_DOMAIN_PATTERNS)) {
+    reasons.push('query is outside fintech/payment domain');
+    return { classification: 'high_risk', reasons, category: 'out_of_domain' };
+  }
 
   if (matchAny(message, ENUMERATION_PATTERNS)) {
     reasons.push('matches merchant/user enumeration pattern');

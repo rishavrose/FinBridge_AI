@@ -17,6 +17,9 @@ import type { ToolCallTrace } from '../../openai/converter.js';
 export const CANNED_REFUSAL =
   "I can't help with that request.";
 
+export const DOMAIN_REFUSAL =
+  'I can only assist with fintech operations and payment-related analytics.';
+
 /** Patterns that indicate the model is offering an unsafe alternative. */
 const ALTERNATIVE_OFFER_PATTERNS: RegExp[] = [
   /\bwould\s+you\s+like\s+(me\s+to\s+)?(see|fetch|show|list|view)\b/i,

@@ -37,7 +37,7 @@ import { enqueueLearning } from '../../ai/workers/index.js';
 import { recordCacheLog, recordChatHistory, getCacheStats } from '../../ai/analytics/index.js';
 import { classifyQuery } from '../../ai/security/query-classifier.js';
 import { recordSecurityEvent } from '../../ai/security/audit.js';
-import { CANNED_REFUSAL, scrubZeroResultLeak } from '../../ai/security/refusal.js';
+import { CANNED_REFUSAL, DOMAIN_REFUSAL, scrubZeroResultLeak } from '../../ai/security/refusal.js';
 import {
   getRiskState,
   recordRiskEvent,
@@ -193,8 +193,11 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         promptExcerpt: message,
       }).catch(() => {});
 
+      const refusalMessage =
+        category === 'out_of_domain' ? DOMAIN_REFUSAL : CANNED_REFUSAL;
+
       return reply.status(200).send({
-        reply: CANNED_REFUSAL,
+        reply: refusalMessage,
         conversationId: inputConvId,
         messageId: null,
         cached: false,
