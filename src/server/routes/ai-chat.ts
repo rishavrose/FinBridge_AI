@@ -35,6 +35,9 @@ import type { ToolCallTrace } from '../../openai/converter.js';
 import { queryMemory, buildLearningPayload, formatValidatedResponse } from '../../ai/memory/index.js';
 import { enqueueLearning } from '../../ai/workers/index.js';
 import { recordCacheLog, recordChatHistory, getCacheStats } from '../../ai/analytics/index.js';
+import { classifyQuery } from '../../ai/security/query-classifier.js';
+import { recordSecurityEvent } from '../../ai/security/audit.js';
+import { CANNED_REFUSAL, scrubZeroResultLeak } from '../../ai/security/refusal.js';
 import {
   getConversationContext,
   appendToContextCache,
@@ -150,6 +153,61 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     const { message, conversationId: inputConversationId, systemPrompt } = request.body;
     const userId = request.user.id;
     const callerRole = request.user.role as Role;
+
+    // ── 0. Security gate (runs BEFORE tool calls or model invocation) ────────
+    // Section 1, 2, 6, 10, 11 of the security brief: high-risk prompts get a
+    // short canned refusal and never touch tools / DB. The event is audited
+    // for risk-scoring (Phase 2).
+    const classification = classifyQuery(message);
+
+    if (classification.classification === 'high_risk') {
+      const refusalConvId = inputConversationId ?? null;
+      // Best-effort audit log — non-blocking.
+      recordSecurityEvent({
+        userId,
+        conversationId: refusalConvId,
+        eventType: 'refusal',
+        classification: classification.classification,
+        category: classification.category ?? null,
+        reasons: classification.reasons,
+        promptExcerpt: message,
+      }).catch(() => {});
+
+      logger.warn(
+        {
+          userId,
+          category: classification.category,
+          reasons: classification.reasons,
+        },
+        'AI security: refused high-risk prompt before tool execution',
+      );
+
+      return reply.status(200).send({
+        reply: CANNED_REFUSAL,
+        conversationId: refusalConvId,
+        messageId: null,
+        cached: false,
+        cacheSource: 'openai',
+        confidence: null,
+        responseType: 'miss',
+        responseMs: Date.now() - startMs,
+        toolCallsExecuted: 0,
+        toolCallsTrace: [],
+        refused: true,
+      });
+    }
+
+    // 'safe' and 'sensitive' both continue, but 'sensitive' is audited so we
+    // can track patterns across a session.
+    recordSecurityEvent({
+      userId,
+      conversationId: inputConversationId ?? null,
+      eventType: 'classification',
+      classification: classification.classification,
+      category: classification.category ?? null,
+      reasons: classification.reasons,
+      promptExcerpt: message,
+    }).catch(() => {});
 
     // ── 1. Resolve or create conversation ────────────────────────────────────
     let conversationId = inputConversationId ?? null;
@@ -285,6 +343,37 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       toolCallsExecuted = chatResult.toolCallsExecuted;
       toolCallsTrace = chatResult.toolCallsTrace;
       cacheSource = 'openai';
+
+      // ── Zero-result protection (Section 3) ───────────────────────────────
+      // If every tool returned empty but the model still offered to fetch
+      // "top X" or "similar Y", replace the reply with a flat empty-result
+      // message. Each tool-role message in `chatResult.messages` holds the
+      // JSON payload that was fed back to the model — that's our source of
+      // truth for whether any data actually came back.
+      const toolResultsRaw = chatResult.messages
+        .filter((m): m is typeof m & { role: 'tool'; content: string } =>
+          m.role === 'tool' && typeof m.content === 'string',
+        )
+        .map((m) => m.content);
+
+      const scrub = scrubZeroResultLeak({
+        reply: reply_text,
+        toolCallsTrace,
+        toolResultsRaw,
+      });
+      if (scrub.scrubbed) {
+        reply_text = scrub.reply;
+        recordSecurityEvent({
+          userId,
+          conversationId,
+          eventType: 'zero_result_block',
+          classification: classification.classification,
+          category: classification.category ?? null,
+          reasons: ['model offered alternatives after zero-result tool calls'],
+          promptExcerpt: message,
+        }).catch(() => {});
+        logger.warn({ userId, conversationId }, 'AI security: scrubbed zero-result leak');
+      }
       modelTier = chatResult.tier;
       modelUsed = chatResult.modelUsed;
       grounded = chatResult.validation?.grounded;
