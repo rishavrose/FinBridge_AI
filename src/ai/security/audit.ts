@@ -20,9 +20,12 @@ import type { Classification } from './query-classifier.js';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type SecurityEventType =
-  | 'classification'   // every turn gets one of these
-  | 'refusal'          // we refused before running any tool
-  | 'zero_result_block'; // we scrubbed a "would you like X instead?" leak
+  | 'classification'     // every turn gets one of these
+  | 'refusal'            // we refused before running any tool
+  | 'zero_result_block'  // we scrubbed a "would you like X instead?" leak
+  | 'risk_change'        // session risk level moved up or down
+  | 'lockout'            // CRITICAL reached → user is locked out for N min
+  | 'lockout_refusal';   // user attempted a query while locked out
 
 export interface SecurityEvent {
   userId: string;

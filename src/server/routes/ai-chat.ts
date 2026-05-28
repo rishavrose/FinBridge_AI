@@ -39,6 +39,11 @@ import { classifyQuery } from '../../ai/security/query-classifier.js';
 import { recordSecurityEvent } from '../../ai/security/audit.js';
 import { CANNED_REFUSAL, scrubZeroResultLeak } from '../../ai/security/refusal.js';
 import {
+  getRiskState,
+  recordRiskEvent,
+  type RiskLevel,
+} from '../../ai/security/risk-engine.js';
+import {
   getConversationContext,
   appendToContextCache,
   isContextualMessage,
@@ -154,37 +159,39 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     const userId = request.user.id;
     const callerRole = request.user.role as Role;
 
-    // ── 0. Security gate (runs BEFORE tool calls or model invocation) ────────
-    // Section 1, 2, 6, 10, 11 of the security brief: high-risk prompts get a
-    // short canned refusal and never touch tools / DB. The event is audited
-    // for risk-scoring (Phase 2).
-    const classification = classifyQuery(message);
+    // ── 0. Security gate (Phase 1 + 2) ───────────────────────────────────────
+    // Layered:
+    //   (a) Lockout check — if user is CRITICAL-locked, refuse immediately.
+    //   (b) Classify the prompt (enumeration / schema / tool / sensitive).
+    //   (c) Read current session risk level.
+    //   (d) Decide effective action based on classification + risk level:
+    //         LOW      → use classifier verdict as-is
+    //         MEDIUM   → sensitive escalates to refusal
+    //         HIGH     → every prompt refused; no tools, no model
+    //         CRITICAL → HIGH behaviour + already locked out
+    //   (e) If refusing, record points to the risk engine (which may
+    //       transition the user to the next level and trigger lockout).
 
-    if (classification.classification === 'high_risk') {
-      const refusalConvId = inputConversationId ?? null;
-      // Best-effort audit log — non-blocking.
+    const inputConvId = inputConversationId ?? null;
+
+    const sendCannedRefusal = (
+      eventType: 'refusal' | 'lockout_refusal',
+      reasons: string[],
+      category: string | null,
+    ) => {
       recordSecurityEvent({
         userId,
-        conversationId: refusalConvId,
-        eventType: 'refusal',
-        classification: classification.classification,
-        category: classification.category ?? null,
-        reasons: classification.reasons,
+        conversationId: inputConvId,
+        eventType,
+        classification: 'high_risk',
+        category,
+        reasons,
         promptExcerpt: message,
       }).catch(() => {});
 
-      logger.warn(
-        {
-          userId,
-          category: classification.category,
-          reasons: classification.reasons,
-        },
-        'AI security: refused high-risk prompt before tool execution',
-      );
-
       return reply.status(200).send({
         reply: CANNED_REFUSAL,
-        conversationId: refusalConvId,
+        conversationId: inputConvId,
         messageId: null,
         cached: false,
         cacheSource: 'openai',
@@ -195,19 +202,146 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         toolCallsTrace: [],
         refused: true,
       });
+    };
+
+    const preRisk = await getRiskState(userId).catch(() => ({
+      score: 0,
+      level: 'LOW' as RiskLevel,
+      lockedOut: false,
+    }));
+
+    // (a) Lockout — short-circuit before we even touch the classifier.
+    if (preRisk.lockedOut) {
+      logger.warn(
+        { userId, score: preRisk.score },
+        'AI security: refusing request — session is locked out',
+      );
+      return sendCannedRefusal('lockout_refusal', ['session locked out'], 'locked');
     }
 
-    // 'safe' and 'sensitive' both continue, but 'sensitive' is audited so we
-    // can track patterns across a session.
+    // (b) Classify.
+    const classification = classifyQuery(message);
+
+    // (c) Decide effective action.
+    let effectiveAction: 'refuse' | 'allow' = 'allow';
+    let refuseReasons: string[] = classification.reasons;
+    let refuseCategory: string | null = classification.category ?? null;
+
+    if (classification.classification === 'high_risk') {
+      effectiveAction = 'refuse';
+    } else if (
+      classification.classification === 'sensitive' &&
+      (preRisk.level === 'MEDIUM' || preRisk.level === 'HIGH' || preRisk.level === 'CRITICAL')
+    ) {
+      // MEDIUM escalation — once a session has shown probing, sensitive
+      // queries no longer get the benefit of the doubt.
+      effectiveAction = 'refuse';
+      refuseReasons = [...refuseReasons, `escalated by session risk level ${preRisk.level}`];
+    } else if (preRisk.level === 'HIGH' || preRisk.level === 'CRITICAL') {
+      // HIGH+ — every prompt is refused regardless of classification.
+      effectiveAction = 'refuse';
+      refuseReasons = ['session risk is HIGH — all requests blocked'];
+      refuseCategory = 'session_risk_high';
+    }
+
+    if (effectiveAction === 'refuse') {
+      // (d) Score the event and (e) maybe trigger lockout / alert.
+      const source =
+        classification.classification === 'sensitive'
+          ? 'sensitive'
+          : 'refusal';
+
+      const riskUpdate = await recordRiskEvent(userId, source).catch(() => null);
+
+      // Audit the level transition itself (admins want to see it).
+      if (riskUpdate?.transitioned) {
+        recordSecurityEvent({
+          userId,
+          conversationId: inputConvId,
+          eventType: 'risk_change',
+          classification: classification.classification,
+          category: refuseCategory,
+          reasons: [
+            `level: ${riskUpdate.before.level} → ${riskUpdate.after.level}`,
+            `score: ${riskUpdate.before.score} → ${riskUpdate.after.score}`,
+          ],
+          promptExcerpt: message,
+        }).catch(() => {});
+
+        logger.warn(
+          {
+            event: 'ai.security.risk_change',
+            userId,
+            from: riskUpdate.before.level,
+            to: riskUpdate.after.level,
+            score: riskUpdate.after.score,
+          },
+          'AI security: session risk level changed',
+        );
+      }
+
+      // CRITICAL transition → record lockout event and emit admin alert.
+      if (
+        riskUpdate &&
+        riskUpdate.after.level === 'CRITICAL' &&
+        riskUpdate.before.level !== 'CRITICAL'
+      ) {
+        recordSecurityEvent({
+          userId,
+          conversationId: inputConvId,
+          eventType: 'lockout',
+          classification: 'high_risk',
+          category: 'session_critical',
+          reasons: [
+            `session score reached ${riskUpdate.after.score} (CRITICAL)`,
+            '10-minute lockout applied',
+          ],
+          promptExcerpt: message,
+        }).catch(() => {});
+
+        // Structured alert log — alert engine can subscribe to `ai.security.alert`.
+        logger.error(
+          {
+            event: 'ai.security.alert',
+            severity: 'critical',
+            userId,
+            score: riskUpdate.after.score,
+            lastPrompt: message.slice(0, 200),
+          },
+          'AI security ALERT: user session reached CRITICAL — locked out',
+        );
+      }
+
+      logger.warn(
+        {
+          userId,
+          category: refuseCategory,
+          riskLevel: riskUpdate?.after.level ?? preRisk.level,
+          riskScore: riskUpdate?.after.score ?? preRisk.score,
+        },
+        'AI security: refused prompt',
+      );
+
+      return sendCannedRefusal('refusal', refuseReasons, refuseCategory);
+    }
+
+    // (b/c continued) 'safe' or 'sensitive' below the escalation bar — log
+    // the classification for visibility, then proceed normally.
     recordSecurityEvent({
       userId,
-      conversationId: inputConversationId ?? null,
+      conversationId: inputConvId,
       eventType: 'classification',
       classification: classification.classification,
       category: classification.category ?? null,
       reasons: classification.reasons,
       promptExcerpt: message,
     }).catch(() => {});
+
+    if (classification.classification === 'sensitive') {
+      // Audited but allowed at LOW — still scores points so a flurry of
+      // bulk-export queries pushes the user toward MEDIUM.
+      recordRiskEvent(userId, 'sensitive').catch(() => null);
+    }
 
     // ── 1. Resolve or create conversation ────────────────────────────────────
     let conversationId = inputConversationId ?? null;
@@ -372,6 +506,9 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
           reasons: ['model offered alternatives after zero-result tool calls'],
           promptExcerpt: message,
         }).catch(() => {});
+        // Scrubbed leaks accumulate risk too — three of these in a window
+        // pushes the user toward MEDIUM the same way refusals do.
+        recordRiskEvent(userId, 'zero_result_block').catch(() => null);
         logger.warn({ userId, conversationId }, 'AI security: scrubbed zero-result leak');
       }
       modelTier = chatResult.tier;
