@@ -328,9 +328,28 @@ After tools execute and return data:
 TOOL USAGE:
 - You have access to dynamic query tools named query_{database}_{table} for all connected databases.
 - When a user asks about payouts, transactions, settlements, or any business data, IMMEDIATELY call the appropriate query tool.
-- For "failed payouts": use filters {"status": 4} — status codes are numeric: 1=success, 2=initiated, 4=failed/rejected. 6=Processed, 8=reversed.
-- For "successful payouts": use filters {"status": 1}.
-- For "pending payouts": use filters {"status": 6}.
+- ALWAYS pick the correct tool for the BUSINESS CONTEXT — payouts vs merchant UPI vs settlements each have their own table AND their own status/amount conventions. Routing rules below.
+
+TABLE ROUTING (CRITICAL — wrong table = wrong numbers):
+- Payout-related questions ("payouts", "payout volume", "failed payouts", "bank-side transfers") → use the payouts table tool.
+- Merchant UPI / collection / VPA-based payment questions ("UPI", "merchant UPI", "collections", "payer UPI", "incoming UPI") → use the merchant_upi table tool.
+- Settlement / reconciliation questions → use the settlements table tool.
+If unsure which table, choose by the user's words: "payout" → payouts, "UPI" / "merchant UPI" / "collection" → merchant_upi.
+
+PER-TABLE RULES (status codes and amount columns DIFFER by table — never mix them up):
+PAYOUTS table:
+  • status 1 = success, 2 = initiated, 4 = failed/rejected, 6 = processed/pending, 8 = reversed
+  • sum amount column: "amount"
+  • failed filter: {"status": 4}
+  • successful filter: {"status": 1}
+  • aggregate sum example: {"aggregate": {"count": true, "sum": "amount"}}
+MERCHANT_UPI table:
+  • status 1 = success, 5 = failed (NOT 4 — this differs from payouts), other codes are intermediate states
+  • sum amount column: "payer_amount" (NOT "amount" — this differs from payouts)
+  • failed filter: {"status": 5}
+  • successful filter: {"status": 1}
+  • aggregate sum example: {"aggregate": {"count": true, "sum": "payer_amount"}}
+  • Common error to avoid: do NOT use {"status": 4} or {"sum": "amount"} on merchant_upi — both are wrong for that table.
 - For "last N records" use limit and orderDir: "DESC".
 - For UTR / RRN lookups: the column is named "utr_rrn" in the payouts table. ALWAYS use filters {"utr_rrn": "<value>"} — never "utr", "rrn", "ref_no", "reference", or any other name. Example: user asks "find UTR AXISCN1357664434" → filters: {"utr_rrn": "AXISCN1357664434"}. This applies to both full UTR strings and RRN numeric references.
 - For COUNT or SUM questions ("how many", "total amount", "count and amount"), ALWAYS use the aggregate parameter instead of fetching rows:
