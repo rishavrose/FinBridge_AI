@@ -397,21 +397,16 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       }),
     ]);
 
-    // Cache-bypass policy. Skip the semantic prompt-hash cache when:
-    //   (a) the message references prior turns ("they", "it", "why?") AND
-    //       there IS prior context to resolve against, OR
-    //   (b) the message asks for LIVE analytics ("current success rate", "TPS
-    //       now", "today's failed payouts"). Cached analytics go stale the
-    //       moment the DB ticks forward — see screenshot bug where the first
-    //       answer used cached counts and "recheck" returned fresher counts.
+    // Cache-bypass policy — ALWAYS bypass semantic cache and force live tool calls.
+    // Every query hits the live database via MCP tools to guarantee fresh, accurate data.
     const liveAnalytics = isLiveAnalyticsQuery(message);
     const contextual = conversationContext.length > 0 && isContextualMessage(message);
-    const skipSemanticCache = contextual || liveAnalytics;
+    const skipSemanticCache = true; // Always force live MCP tool calls
 
-    if (liveAnalytics) {
+    if (liveAnalytics || contextual) {
       logger.info(
         { userId, conversationId, message: message.slice(0, 120) },
-        'AI chat: live-analytics query — forcing MCP-first (semantic cache bypassed)',
+        'AI chat: forcing MCP-first (semantic cache always bypassed)',
       );
     }
 
