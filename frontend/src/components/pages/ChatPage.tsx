@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { aiChat, listConversations, getConversation, deleteConversation } from '../../api/client';
 import type { ChatMessage, AiChatResponse, Conversation, ConversationMessage, ToolCallInfo } from '../../types';
 import { useVoice } from '../../hooks/useVoice';
+import { useAiStream } from '../../hooks/useAiStream';
+import { AiOperationsLoader } from '../AiOperationsLoader';
 
 interface ChatPageProps {
   token: string;
@@ -336,26 +338,7 @@ function RecordsView({ data }: { data: ParsedRecords }) {
   );
 }
 
-// ─── Dynamic loading hook ─────────────────────────────────────────────────────
-
-const LOADING_STEPS = [
-  { icon: '🔌', text: 'Connecting to database...' },
-  { icon: '🔍', text: 'Running your query...' },
-  { icon: '📦', text: 'Fetching records...' },
-  { icon: '⚙️',  text: 'Processing data...' },
-  { icon: '🧮', text: 'Crunching numbers...' },
-  { icon: '✨', text: 'Preparing response...' },
-];
-
-function useLoadingPhrase(active: boolean) {
-  const [idx, setIdx] = useState(0);
-  useEffect(() => {
-    if (!active) { setIdx(0); return; }
-    const t = setInterval(() => setIdx(i => Math.min(i + 1, LOADING_STEPS.length - 1)), 1800);
-    return () => clearInterval(t);
-  }, [active]);
-  return LOADING_STEPS[idx];
-}
+// ─── Smart loading hook (replaced by AiOperationsLoader) ─────────────────────
 
 function MessageContent({ content }: { content: string }) {
   const records = tryParseRecords(content);
@@ -378,7 +361,7 @@ export function ChatPage({ token }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const loadingStep = useLoadingPhrase(loading);
+  const [pendingQuery, setPendingQuery] = useState('');
   const [sidebarLoading, setSidebarLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showConvList, setShowConvList] = useState(false);
@@ -415,6 +398,8 @@ export function ChatPage({ token }: ChatPageProps) {
     },
     onInterim: (text) => setVoiceDraft(text),
   });
+
+  const { streamState, startStream, endStream } = useAiStream(token);
 
   // Auto-close modal if recognition ends without a transcript (no-speech timeout)
   useEffect(() => {
@@ -536,10 +521,12 @@ export function ChatPage({ token }: ChatPageProps) {
     };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
+    setPendingQuery(text.trim());
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
     setLoading(true);
+    startStream(activeConvId);
 
     try {
       const res: AiChatResponse = await aiChat(text.trim(), token, activeConvId ?? undefined);
@@ -576,6 +563,8 @@ export function ChatPage({ token }: ChatPageProps) {
       setMessages(prev => [...prev, errMsg]);
     } finally {
       setLoading(false);
+      endStream();
+      setPendingQuery('');
     }
   };
 
@@ -888,25 +877,16 @@ export function ChatPage({ token }: ChatPageProps) {
 
           {/* Typing / loading indicator */}
           {loading && (
-            <div className="flex gap-3">
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-brand to-brand-700 flex items-center justify-center flex-shrink-0 shadow-md shadow-brand/25 mt-5 animate-pulse">
+            <div className="flex gap-3 msg-animate">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-brand to-brand-700 flex items-center justify-center flex-shrink-0 shadow-md shadow-brand/25 mt-5">
                 <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
               </div>
-              <div className="flex flex-col gap-1.5">
+              <div className="flex flex-col gap-1.5 max-w-2xl w-full">
                 <span className="text-[11px] font-semibold text-gray-400 px-1">FinBridge AI</span>
                 <div className="bg-white border border-[#EBEBEB] rounded-2xl rounded-tl-sm px-5 py-4 shadow-sm">
-                  <div className="flex items-center gap-3">
-                    <div className="flex gap-1.5">
-                      <div className="w-2 h-2 rounded-full bg-brand animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-brand/70 animate-bounce" style={{ animationDelay: '160ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-brand/40 animate-bounce" style={{ animationDelay: '320ms' }} />
-                    </div>
-                    <span className="text-xs text-gray-400 transition-all duration-500">
-                      {loadingStep.icon} {loadingStep.text}
-                    </span>
-                  </div>
+                  <AiOperationsLoader query={pendingQuery} streamState={streamState} />
                 </div>
               </div>
             </div>

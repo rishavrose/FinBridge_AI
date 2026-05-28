@@ -63,6 +63,7 @@ import {
 } from '../../ai/conversation/tool-results.js';
 import { logger } from '../../utils/logger.js';
 import type { Role } from '../../types/index.js';
+import { emitAiProgress, emitAiToolStart, emitAiToolDone } from '../../realtime/socket.js';
 
 // ─── Request / Response types ─────────────────────────────────────────────────
 
@@ -349,6 +350,9 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     // ── 1. Resolve or create conversation ────────────────────────────────────
     let conversationId = inputConversationId ?? null;
 
+    // Emit initial progress — query is being processed
+    emitAiProgress({ conversationId: inputConvId, stage: 'start', message: 'Analyzing your query...' });
+
     if (conversationId) {
       // Verify the conversation belongs to this user
       const [conv] = await executeSelect<ConversationRow>(
@@ -423,6 +427,13 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         }
       : memoryResultPre;
 
+    // Emit cache check progress
+    emitAiProgress({
+      conversationId,
+      stage: 'cache_check',
+      message: memoryResult.hit ? 'Found in knowledge base...' : 'Fetching live data from systems...',
+    });
+
     let reply_text: string;
     let toolCallsExecuted = 0;
     let toolCallsTrace: ToolCallTrace[] = [];
@@ -443,6 +454,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       // ── Cache HIT ──────────────────────────────────────────────────────────
       cacheSource = memoryResult.source as 'redis' | 'qdrant';
       reply_text = cachedResponse;
+      emitAiProgress({ conversationId, stage: 'cache_hit', message: 'Retrieved from AI knowledge base.' });
 
       logger.info(
         {
@@ -457,6 +469,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     } else {
       // ── Cache MISS — call OpenAI + MCP tools ───────────────────────────────
       logger.info({ userId, intent: memoryResult.intentCategory }, 'AI chat: cache MISS — calling OpenAI');
+      emitAiProgress({ conversationId, stage: 'generating', message: 'Running AI analysis on live systems...' });
 
       if (!env.OPENAI_API_KEY) {
         return reply.status(503).send({
@@ -480,6 +493,13 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       toolCallsExecuted = chatResult.toolCallsExecuted;
       toolCallsTrace = chatResult.toolCallsTrace;
       cacheSource = 'openai';
+
+      // Emit tool activity events from the trace
+      for (const trace of chatResult.toolCallsTrace) {
+        emitAiToolStart(conversationId, trace.name);
+        emitAiToolDone(conversationId, trace.name);
+      }
+      emitAiProgress({ conversationId, stage: 'validating', message: 'Verifying response accuracy...' });
 
       // ── Zero-result protection (Section 3) ───────────────────────────────
       // If every tool returned empty but the model still offered to fetch
@@ -670,6 +690,9 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
 
     // Wait for the assistant-message write so the response is consistent.
     await persistPromise;
+
+    // Emit completion event
+    emitAiProgress({ conversationId, stage: 'complete', message: 'Response ready.' });
 
     // Frontend safety (Section 17 + Phase 4 role visibility): every caller
     // gets exactly the level of trace detail their visibility tier permits.

@@ -75,6 +75,41 @@ export function emitInsight(insight: string): void {
   io?.emit('ai:insight', { ts: Date.now(), insight });
 }
 
+// ─── AI Chat Progress Events ──────────────────────────────────────────────────
+
+export type AiProgressStage =
+  | 'start'
+  | 'cache_check'
+  | 'context_load'
+  | 'tool_start'
+  | 'tool_done'
+  | 'generating'
+  | 'validating'
+  | 'complete'
+  | 'cache_hit';
+
+export interface AiProgressPayload {
+  conversationId: string | null;
+  stage: AiProgressStage;
+  message: string;
+  tool?: string;
+}
+
+/** Emit AI processing progress to all connected clients */
+export function emitAiProgress(payload: AiProgressPayload): void {
+  io?.emit('ai:progress', { ts: Date.now(), ...payload });
+}
+
+/** Emit when an MCP tool starts executing */
+export function emitAiToolStart(conversationId: string | null, tool: string): void {
+  io?.emit('ai:tool_start', { ts: Date.now(), conversationId, tool });
+}
+
+/** Emit when an MCP tool finishes executing */
+export function emitAiToolDone(conversationId: string | null, tool: string): void {
+  io?.emit('ai:tool_done', { ts: Date.now(), conversationId, tool });
+}
+
 export function getConnectedClients(): number {
   return io?.sockets.sockets.size ?? 0;
 }

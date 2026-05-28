@@ -38,3 +38,43 @@ html, body, #root {
   animation: fadeSlideIn 0.22s ease both;
 }
 
+/* ── AI Operations Loader animations ─────────────────────────────────────── */
+
+@keyframes pingSlowPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(1.4); }
+}
+
+.animate-ping-slow {
+  animation: pingSlowPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.6s infinite linear;
+}
+
+@keyframes slideInStep {
+  from { opacity: 0; transform: translateX(-6px); }
+  to   { opacity: 1; transform: translateX(0);    }
+}
+
+.step-animate {
+  animation: slideInStep 0.25s ease both;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+.fade-in-up {
+  animation: fadeInUp 0.3s ease both;
+}
+

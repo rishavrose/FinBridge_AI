@@ -38,7 +38,8 @@ export interface ClassifyResult {
  * so phrasing like "show me today's biggest payouts by merchant" trips it.
  */
 const ENUMERATION_PATTERNS: RegExp[] = [
-  /\b(top|biggest|largest|highest)\s+\d*\s*(merchant|user|account|payout|transaction|customer|payer|payee|sender|receiver|recipient|client)s?\b/i,
+  // "top 10 merchants", "biggest users", "largest accounts" — identity enumeration
+  /\b(top|biggest|largest|highest)\s+\d*\s*(merchant|user|account|customer|payer|payee|sender|receiver|recipient|client)s?\b/i,
   /\blist\s+(all|every|the)?\s*(merchant|user|account|customer|payer|payee|sender|receiver|recipient|client)s?\b/i,
   /\b(show|give)\s+me\s+(all|every|the)\s+(merchant|user|account|customer)s?\b/i,
   /\b(who|which)\s+(are\s+the\s+)?(top|biggest|largest|highest)\s+(merchant|user|account|customer|payer)s?\b/i,
