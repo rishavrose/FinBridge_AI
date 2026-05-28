@@ -45,7 +45,7 @@ import {
 } from '../../ai/security/risk-engine.js';
 import { guardResponse } from '../../ai/security/response-guard.js';
 import { isCacheable } from '../../ai/security/cache-safety.js';
-import { redactToolCallsTrace, shouldRedactTrace } from '../../ai/security/trace-redactor.js';
+import { redactToolCallsTrace } from '../../ai/security/trace-redactor.js';
 import {
   getConversationContext,
   appendToContextCache,
@@ -671,18 +671,13 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     // Wait for the assistant-message write so the response is consistent.
     await persistPromise;
 
-    // Frontend safety (Section 17): admins get the full trace with SQL +
-    // params for debugging; everyone else gets just the tool names. We
-    // already block the AI from naming tables/columns in its REPLY; this
-    // closes the parallel leak through the trace sidecar.
-    const safeTrace = shouldRedactTrace(callerRole)
-      ? redactToolCallsTrace(toolCallsTrace, callerRole)
-      : toolCallsTrace.map((t) => ({
-          name: t.name,
-          args: t.args,
-          ...(t.sql ? { sql: t.sql } : {}),
-          ...(t.params ? { params: t.params } : {}),
-        }));
+    // Frontend safety (Section 17 + Phase 4 role visibility): every caller
+    // gets exactly the level of trace detail their visibility tier permits.
+    // - admin    → real tool name + args + sql + params
+    // - service  → real tool name + args (no SQL)
+    // - analyst  → generic category label only ("payout_query"), no args
+    // - readonly → same as analyst
+    const safeTrace = redactToolCallsTrace(toolCallsTrace, callerRole);
 
     return reply.status(200).send({
       reply: reply_text,

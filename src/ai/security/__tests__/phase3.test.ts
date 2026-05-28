@@ -222,10 +222,11 @@ describe('redactToolCallsTrace', () => {
     assert.deepEqual(out, sampleTrace);
   });
 
-  it('strips sql/params/args for non-admin', () => {
+  it('strips sql/params/args for non-admin (Phase 4: name is also categorized)', () => {
     const out = redactToolCallsTrace(sampleTrace, 'analyst');
     assert.equal(out.length, 1);
-    assert.equal(out[0].name, 'query_securenxt_tbl_payouts');
+    // Phase 4 swaps the internal tool name for a category label.
+    assert.equal(out[0].name, 'payout_query');
     assert.deepEqual(out[0].args, {});
     assert.equal((out[0] as { sql?: string }).sql, undefined);
     assert.equal((out[0] as { params?: unknown[] }).params, undefined);

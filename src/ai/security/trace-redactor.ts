@@ -1,37 +1,49 @@
 /**
  * Tool-call trace redactor.
  *
- * The chat response includes a `toolCallsTrace` array — useful for admins to
- * see which queries the AI ran. But the trace also carries the raw SQL and
- * bound parameters, which we should NEVER leak to non-admin users:
- *   - It exposes the table/column schema (we just spent a lot of effort
- *     forbidding the model from doing that itself).
- *   - It reveals WHO/WHAT was queried (bound params often contain user
- *     IDs, dates, status codes).
+ * The chat response includes a `toolCallsTrace` sidecar. The amount of
+ * detail we expose depends on the caller's visibility tier (Phase 4):
  *
- * This module returns a redacted copy for non-admin callers.
+ *   full     → admin           name + args + sql + params  (debug-grade)
+ *   business → service         name + args                 (no SQL/params)
+ *   redacted → analyst/readonly category + no args         (no real tool name)
+ *
+ * `category` is a stable business-language label (`payout_query`,
+ * `bank_query`, …) that conveys WHAT was queried without revealing the
+ * underlying table or tool name.
  */
 
 import type { ToolCallTrace } from '../../openai/converter.js';
 import type { Role } from '../../types/index.js';
+import {
+  getVisibilityTier,
+  showsRealToolNames,
+  showsSqlAndParams,
+  showsToolArgs,
+} from './role-policy.js';
+import { toolCategory } from './tool-categorizer.js';
 
-/** Roles that get the full unredacted trace. */
-const TRACE_FULL_ACCESS_ROLES: Role[] = ['admin'];
-
+/** True iff anything in the trace would be redacted for this role. */
 export function shouldRedactTrace(role: Role): boolean {
-  return !TRACE_FULL_ACCESS_ROLES.includes(role);
+  return getVisibilityTier(role) !== 'full';
 }
 
-/**
- * Return a copy of the trace that is safe to send to a user of the given role.
- *
- * For non-admin roles we keep just the tool NAME — that's enough for the UI to
- * render a "I ran 2 queries" badge — and drop the args, sql, and params.
- */
 export function redactToolCallsTrace(
   trace: ToolCallTrace[],
   role: Role,
 ): ToolCallTrace[] {
-  if (!shouldRedactTrace(role)) return trace;
-  return trace.map((t) => ({ name: t.name, args: {} }));
+  const tier = getVisibilityTier(role);
+  if (tier === 'full') return trace;
+
+  return trace.map((t) => {
+    const safe: ToolCallTrace = {
+      name: showsRealToolNames(role) ? t.name : toolCategory(t.name),
+      args: showsToolArgs(role) ? t.args : {},
+    };
+    if (showsSqlAndParams(role)) {
+      if (t.sql) safe.sql = t.sql;
+      if (t.params) safe.params = t.params;
+    }
+    return safe;
+  });
 }
