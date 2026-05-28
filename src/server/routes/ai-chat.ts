@@ -43,6 +43,9 @@ import {
   recordRiskEvent,
   type RiskLevel,
 } from '../../ai/security/risk-engine.js';
+import { guardResponse } from '../../ai/security/response-guard.js';
+import { isCacheable } from '../../ai/security/cache-safety.js';
+import { redactToolCallsTrace, shouldRedactTrace } from '../../ai/security/trace-redactor.js';
 import {
   getConversationContext,
   appendToContextCache,
@@ -519,6 +522,28 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         value: u.value,
       }));
 
+      // ── MCP trust layer / response validation (Section 7 + 9) ─────────────
+      // If the model returned currency / IDs that don't appear in the tool
+      // results, replace the reply with the safe fallback. The original
+      // ungrounded text is preserved in the structured warning log.
+      const guard = guardResponse({
+        reply: reply_text,
+        validation: chatResult.validation,
+      });
+      if (guard.blocked) {
+        reply_text = guard.reply;
+        grounded = false;
+        recordSecurityEvent({
+          userId,
+          conversationId,
+          eventType: 'zero_result_block', // re-using the closest existing kind
+          classification: classification.classification,
+          category: 'ungrounded_reply',
+          reasons: [guard.reason ?? 'response failed grounding check'],
+          promptExcerpt: message,
+        }).catch(() => {});
+      }
+
       // ── Persist tool-result sidecar + advance conversation state ──────────
       // Fire-and-forget — non-blocking. Both writes are Redis-only with TTL.
       if (chatResult.newToolResults.length > 0) {
@@ -556,7 +581,16 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         reply_text.toLowerCase().includes('no matching records') ||
         reply_text.toLowerCase().includes('0 records');
 
-      if (!isEmptyResult && !isPlaceholderResponse(reply_text)) {
+      // Cache safety (Section 16): some replies — those naming specific
+      // payouts, merchants, accounts — must NEVER be semantic-cached because
+      // a fuzzy-similar future prompt would replay this user's private data.
+      const cacheability = isCacheable(message, reply_text);
+
+      if (
+        !isEmptyResult &&
+        !isPlaceholderResponse(reply_text) &&
+        cacheability.cacheable
+      ) {
         const learningPayload = buildLearningPayload({
           originalPrompt: message,
           response: reply_text,
@@ -567,6 +601,16 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
 
         enqueueLearning(learningPayload).catch((e: unknown) =>
           logger.warn({ err: e }, 'enqueueLearning failed'),
+        );
+      } else if (!cacheability.cacheable) {
+        logger.info(
+          {
+            userId,
+            intent: memoryResult.intentCategory,
+            source: cacheability.source,
+            reason: cacheability.reason,
+          },
+          'AI chat: skipping learning enqueue — response not safe to cache',
         );
       } else {
         logger.info(
@@ -627,6 +671,19 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
     // Wait for the assistant-message write so the response is consistent.
     await persistPromise;
 
+    // Frontend safety (Section 17): admins get the full trace with SQL +
+    // params for debugging; everyone else gets just the tool names. We
+    // already block the AI from naming tables/columns in its REPLY; this
+    // closes the parallel leak through the trace sidecar.
+    const safeTrace = shouldRedactTrace(callerRole)
+      ? redactToolCallsTrace(toolCallsTrace, callerRole)
+      : toolCallsTrace.map((t) => ({
+          name: t.name,
+          args: t.args,
+          ...(t.sql ? { sql: t.sql } : {}),
+          ...(t.params ? { params: t.params } : {}),
+        }));
+
     return reply.status(200).send({
       reply: reply_text,
       conversationId,
@@ -637,14 +694,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       responseType: memoryResult.responseType,
       responseMs,
       toolCallsExecuted,
-      // toolCallsTrace now carries `sql` + `params` alongside name/args so
-      // the frontend can render the exact query that produced each metric.
-      toolCallsTrace: toolCallsTrace.map((t) => ({
-        name: t.name,
-        args: t.args,
-        ...(t.sql ? { sql: t.sql } : {}),
-        ...(t.params ? { params: t.params } : {}),
-      })),
+      toolCallsTrace: safeTrace,
       modelTier,
       modelUsed,
       grounded,
