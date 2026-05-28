@@ -45,13 +45,19 @@ const CONTEXTUAL_PATTERNS: RegExp[] = [
   /\b(it|its)\b/i,
   /\bthe\s+(above|previous|last|same|earlier|prior)\b/i,
   /\b(again|also|another|other|else|more)\b/i,
-  /\b(this|that)\s+(issue|problem|error|failure|case|result|data|record|payout|transaction)\b/i,
+  /\b(this|that)\s+(issue|problem|error|failure|case|result|data|record|payout|transaction|utr|rrn|reference|ref|id|number)\b/i,
   // Short follow-up questions (≤ 8 words) are almost always contextual
   /^(why|how|what|when|where|who|which)\b.{0,40}\??\s*$/i,
   // Drill-down patterns
   /\b(drill\s*down|break\s*(it\s*)?down|more\s*detail|elaborate|explain)\b/i,
   // Anaphoric references
   /\b(the\s+(ones?|results?|records?|entries?|items?))\b/i,
+  // Correction / recheck signals — user is telling AI its last answer was wrong
+  /\b(wrong|incorrect|not\s+right|that'?s\s+wrong|this\s+is\s+wrong|recheck|check\s+again|try\s+again|verify\s+again|look\s+again|search\s+again)\b/i,
+  // Continuation openers
+  /^(and\s+(for|what\s+about|regarding)|also\s+(for|check)|now\s+(check|look|find))\b/i,
+  // Specific reference lookups that are continuations of a session
+  /\b(and\s+for\s+(this|that)|for\s+this\s+(utr|rrn|ref|id|number))\b/i,
 ];
 
 /**
@@ -80,6 +86,8 @@ const LIVE_PATTERNS: RegExp[] = [
   /\b(current|live|latest|now|right\s+now|real[\s-]?time|fresh|today'?s?|as\s+of\s+now)\b/i,
   /\b(tps|throughput\s+per\s+second|requests\s+per\s+second)\b/i,
   /\b(last\s+(hour|minute|few\s+minutes))\b/i,
+  // Recheck / correction signals always force a fresh query
+  /\b(recheck|check\s+again|verify\s+again|look\s+again|search\s+again|try\s+again|wrong|incorrect|not\s+right)\b/i,
 ];
 
 /** Subjects that, combined with a LIVE word, must always be re-queried. */
