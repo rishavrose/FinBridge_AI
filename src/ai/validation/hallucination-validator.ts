@@ -152,10 +152,16 @@ export function validateGrounding(
     }
   }
   // IDs
+  const ID_PREFIX_RE = /^(?:TXN|PAYOUT|SETT|PYT|UPI|REF|UTR)[-_]?/i;
   for (const match of reply.matchAll(ID_RE)) {
     const v = match[0];
     checked++;
-    if (!haystack.toUpperCase().includes(v.toUpperCase())) {
+    const inHaystack = haystack.toUpperCase().includes(v.toUpperCase());
+    // Also accept a match on just the alphanumeric part after the prefix
+    // (e.g. "UTR614813743776" → check for "614813743776" in haystack)
+    const valueOnly = v.replace(ID_PREFIX_RE, '');
+    const valueOnlyMatch = valueOnly.length >= 5 && haystack.includes(valueOnly);
+    if (!inHaystack && !valueOnlyMatch) {
       unsupported.push({ kind: 'id', value: v });
     }
   }

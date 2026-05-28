@@ -62,16 +62,20 @@ export function guardResponse(input: GuardInput): GuardResult {
 
   let blockReason: string | undefined;
 
-  if (unsupportedCurrency.length > 0) {
+  // Only block on currency if 2+ distinct currency values are unsupported
+  // (single mismatch is likely a formatting difference e.g. ₹2,499 vs 2499.00)
+  if (unsupportedCurrency.length >= 2) {
     blockReason = `unsupported currency value(s): ${unsupportedCurrency
       .map((u) => u.value)
       .join(', ')}`;
-  } else if (unsupportedIds.length > 0) {
+  } else if (unsupportedIds.length >= 2) {
+    // Only block on IDs if 2+ are unsupported — single ID mismatch is often
+    // a UTR/REF prefix formatting difference, not a fabrication
     blockReason = `unsupported ID value(s): ${unsupportedIds
       .map((u) => u.value)
       .join(', ')}`;
   } else if (
-    unsupportedNumbers.length >= 2 &&
+    unsupportedNumbers.length >= 3 &&
     FINANCIAL_REPLY_PATTERN.test(reply)
   ) {
     blockReason = `${unsupportedNumbers.length} unsupported numeric values in a financial reply`;

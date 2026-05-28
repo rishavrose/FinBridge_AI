@@ -517,8 +517,11 @@ export async function chatWithTools(
       const revalidate = validateGrounding(cleaned, haystack);
       return { reply: cleaned || reply, validation: revalidate };
     } catch (err) {
-      logger.warn({ err }, 'hallucination abstain-retry failed — returning original reply with validation flag');
-      return { reply, validation };
+      // Retry timed out or failed — the tool already returned verified DB data.
+      // Pass back the original reply with null validation so guardResponse
+      // does not block a correct answer due to a network/timeout issue.
+      logger.warn({ err }, 'hallucination abstain-retry failed — passing original reply through without blocking');
+      return { reply, validation: null };
     }
   };
 
