@@ -44,6 +44,17 @@ export const auditQueue = new Queue('audit-events', {
   },
 });
 
+// AI processing queue — handles background AI chat requests so they
+// continue even when the client disconnects or navigates away.
+export const aiProcessingQueue = new Queue('ai-processing', {
+  connection,
+  defaultJobOptions: {
+    attempts: 1,                   // AI requests are not safely retryable
+    removeOnComplete: { count: 500 },
+    removeOnFail: { count: 500 },
+  },
+});
+
 // ─── Queue events ─────────────────────────────────────────────────────────────
 
 const toolQueueEvents = new QueueEvents('tool-execution', { connection });
@@ -54,6 +65,16 @@ toolQueueEvents.on('completed', ({ jobId }) => {
 
 toolQueueEvents.on('failed', ({ jobId, failedReason }) => {
   logger.error({ jobId, reason: failedReason }, 'Tool execution job failed');
+});
+
+const aiProcessingQueueEvents = new QueueEvents('ai-processing', { connection });
+
+aiProcessingQueueEvents.on('completed', ({ jobId }) => {
+  logger.debug({ jobId }, 'AI processing job completed');
+});
+
+aiProcessingQueueEvents.on('failed', ({ jobId, failedReason }) => {
+  logger.error({ jobId, reason: failedReason }, 'AI processing job failed');
 });
 
 // ─── Workers ──────────────────────────────────────────────────────────────────
@@ -74,8 +95,20 @@ export interface AuditJobData {
   timestamp: string;
 }
 
+export interface AiProcessingJobData {
+  jobId: string;
+  conversationId: string;
+  userId: string;
+  callerRole: string;
+  callerName?: string;
+  message: string;
+  userMessageId: string;
+  systemPrompt?: string;
+}
+
 let _toolWorker: Worker | null = null;
 let _auditWorker: Worker | null = null;
+export let _aiProcessingWorker: Worker | null = null;
 
 export function startWorkers(
   toolProcessor: (data: ToolJobData) => Promise<unknown>,
@@ -112,9 +145,12 @@ export async function closeQueues(): Promise<void> {
   await Promise.all([
     _toolWorker?.close(),
     _auditWorker?.close(),
+    _aiProcessingWorker?.close(),
     toolExecutionQueue.close(),
     auditQueue.close(),
+    aiProcessingQueue.close(),
     toolQueueEvents.close(),
+    aiProcessingQueueEvents.close(),
   ]);
   logger.info('BullMQ queues and workers closed');
 }

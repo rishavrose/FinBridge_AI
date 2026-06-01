@@ -2,10 +2,10 @@
  * useAiStream — subscribes to Socket.io AI progress events emitted by the
  * backend during AI chat processing.
  *
- * Events listened to:
- *   ai:progress  — stage + message updates from the AI pipeline
- *   ai:tool_start — an MCP tool started executing
- *   ai:tool_done  — an MCP tool finished executing
+ * Features 1, 7, 8:
+ *  - Joins a user-specific Socket.io room so events are targeted (not broadcast)
+ *  - Handles ai:job_complete / ai:job_failed / ai:job_cancelled for background jobs
+ *  - Auto-reconnects with exponential backoff (Feature 8)
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -37,13 +37,35 @@ export interface AiToolEvent {
   tool: string;
 }
 
+export interface AiJobCompleteEvent {
+  ts: number;
+  jobId: string;
+  conversationId: string;
+  messageId: string;
+  reply: string;
+}
+
+export interface AiJobFailedEvent {
+  ts: number;
+  jobId: string;
+  conversationId: string;
+  error: string;
+}
+
+export interface AiJobCancelledEvent {
+  ts: number;
+  jobId: string;
+  conversationId: string;
+}
+
 export interface AiStreamState {
   stage: AiProgressStage | null;
   message: string;
-  activeTools: string[];      // tools currently running
-  completedTools: string[];   // tools that have finished
-  steps: string[];            // ordered log of business-safe messages
+  activeTools: string[];
+  completedTools: string[];
+  steps: string[];
   isStreaming: boolean;
+  socketConnected: boolean;
 }
 
 const INITIAL_STATE: AiStreamState = {
@@ -53,32 +75,51 @@ const INITIAL_STATE: AiStreamState = {
   completedTools: [],
   steps: [],
   isStreaming: false,
+  socketConnected: false,
 };
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 const API_BASE = ((import.meta as any).env?.VITE_API_URL as string | undefined) ?? '';
 
-export function useAiStream(token: string | null) {
+export function useAiStream(
+  token: string | null,
+  onJobComplete?: (event: AiJobCompleteEvent) => void,
+  onJobFailed?: (event: AiJobFailedEvent) => void,
+) {
   const [state, setState] = useState<AiStreamState>(INITIAL_STATE);
   const socketRef = useRef<Socket | null>(null);
-  const connectedRef = useRef(false);
+  const onJobCompleteRef = useRef(onJobComplete);
+  const onJobFailedRef = useRef(onJobFailed);
 
-  // Connect once when token is available
+  // Keep callbacks up-to-date without reconnecting the socket
+  useEffect(() => { onJobCompleteRef.current = onJobComplete; }, [onJobComplete]);
+  useEffect(() => { onJobFailedRef.current = onJobFailed; }, [onJobFailed]);
+
   useEffect(() => {
-    if (!token || connectedRef.current) return;
-    connectedRef.current = true;
+    if (!token) return;
 
     const socket = io(API_BASE || window.location.origin, {
       path: '/ws',
       transports: ['websocket', 'polling'],
-      auth: { token },
-      reconnectionAttempts: 5,
-      reconnectionDelay: 2000,
+      auth: { token },              // server uses this to join user:{userId} room
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 10000,  // Feature 8: auto-reconnect with backoff
     });
 
     socketRef.current = socket;
 
+    socket.on('connect', () => {
+      setState(prev => ({ ...prev, socketConnected: true }));
+    });
+
+    socket.on('disconnect', () => {
+      setState(prev => ({ ...prev, socketConnected: false }));
+    });
+
+    // ── Real-time progress events ─────────────────────────────────────────────
     socket.on('ai:progress', (event: AiProgressEvent) => {
       setState(prev => ({
         ...prev,
@@ -107,15 +148,47 @@ export function useAiStream(token: string | null) {
       }));
     });
 
+    // ── Background job completion events (Feature 1, 7) ───────────────────────
+    socket.on('ai:job_complete', (event: AiJobCompleteEvent) => {
+      setState(prev => ({
+        ...prev,
+        stage: 'complete',
+        isStreaming: false,
+        activeTools: [],
+        message: 'Response ready.',
+      }));
+      onJobCompleteRef.current?.(event);
+    });
+
+    socket.on('ai:job_failed', (event: AiJobFailedEvent) => {
+      setState(prev => ({
+        ...prev,
+        stage: null,
+        isStreaming: false,
+        activeTools: [],
+        message: '',
+      }));
+      onJobFailedRef.current?.(event);
+    });
+
+    socket.on('ai:job_cancelled', () => {
+      setState(prev => ({
+        ...prev,
+        stage: null,
+        isStreaming: false,
+        activeTools: [],
+        message: '',
+      }));
+    });
+
     return () => {
       socket.disconnect();
       socketRef.current = null;
-      connectedRef.current = false;
     };
   }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Call this when a new message is sent to reset accumulated state */
-  const startStream = useCallback((conversationId: string | null) => {
+  const startStream = useCallback((_conversationId: string | null) => {
     setState({
       stage: 'start',
       message: 'Initializing...',
@@ -123,8 +196,8 @@ export function useAiStream(token: string | null) {
       completedTools: [],
       steps: ['Analyzing your query...'],
       isStreaming: true,
+      socketConnected: socketRef.current?.connected ?? false,
     });
-    void conversationId; // used by caller for correlation
   }, []);
 
   /** Call this when the response has been received */

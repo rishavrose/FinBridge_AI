@@ -1,9 +1,21 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { aiChat, listConversations, getConversation, deleteConversation } from '../../api/client';
-import type { ChatMessage, AiChatResponse, Conversation, ConversationMessage, ToolCallInfo } from '../../types';
+import {
+  aiChat,
+  queueAiChat,
+  cancelAiJob,
+  editMessage as editMessageApi,
+  listConversations,
+  getConversation,
+  deleteConversation,
+} from '../../api/client';
+import type {
+  ChatMessage, AiChatResponse, Conversation, ConversationMessage, ToolCallInfo,
+} from '../../types';
 import { useVoice } from '../../hooks/useVoice';
 import { useAiStream } from '../../hooks/useAiStream';
+import type { AiJobCompleteEvent, AiJobFailedEvent } from '../../hooks/useAiStream';
 import { humanizeTool } from '../../hooks/useAiStream';
+import { useConversationPersistence } from '../../hooks/useConversationPersistence';
 
 interface ChatPageProps {
   token: string;
@@ -23,69 +35,7 @@ function toUiMessages(rows: ConversationMessage[]): ChatMessage[] {
   }));
 }
 
-// ─── Op Step types ────────────────────────────────────────────────────────────
 
-interface OpStep {
-  title: string;
-  desc: string;
-  timestamp: string;
-  status: 'done' | 'active' | 'pending';
-}
-
-const OP_STEPS: Record<string, Array<{ title: string; desc: string }>> = {
-  payout: [
-    { title: 'Understanding your request', desc: 'UTR lookup initiated' },
-    { title: 'Querying transaction database', desc: 'Searching payouts table' },
-    { title: 'Verifying transaction', desc: 'Cross-checking with banks' },
-    { title: 'Fetching related metadata', desc: 'Retrieving bank & settlement info' },
-    { title: 'Compiling response', desc: 'Preparing detailed output' },
-  ],
-  bank: [
-    { title: 'Understanding your request', desc: 'Bank health query initiated' },
-    { title: 'Scanning bank systems', desc: 'Checking PSP status' },
-    { title: 'Analyzing performance', desc: 'Calculating success rates' },
-    { title: 'Cross-checking data', desc: 'Verifying with live systems' },
-    { title: 'Compiling response', desc: 'Generating health report' },
-  ],
-  fraud: [
-    { title: 'Understanding your request', desc: 'Fraud analysis initiated' },
-    { title: 'Scanning for anomalies', desc: 'Running detection algorithms' },
-    { title: 'Cross-validating signals', desc: 'Checking risk patterns' },
-    { title: 'Scoring transactions', desc: 'Running fraud scoring engine' },
-    { title: 'Compiling response', desc: 'Generating risk report' },
-  ],
-  settlement: [
-    { title: 'Understanding your request', desc: 'Settlement query initiated' },
-    { title: 'Checking settlement queue', desc: 'Verifying records' },
-    { title: 'Analyzing delays', desc: 'Checking clearing schedules' },
-    { title: 'Reconciling data', desc: 'Cross-checking sources' },
-    { title: 'Compiling response', desc: 'Generating settlement report' },
-  ],
-  transaction: [
-    { title: 'Understanding your request', desc: 'Transaction lookup initiated' },
-    { title: 'Querying transaction ledger', desc: 'Fetching live data' },
-    { title: 'Calculating metrics', desc: 'Running volume analysis' },
-    { title: 'Analyzing patterns', desc: 'AI pattern detection' },
-    { title: 'Compiling response', desc: 'Preparing detailed output' },
-  ],
-  general: [
-    { title: 'Understanding your request', desc: 'Query analysis initiated' },
-    { title: 'Querying financial database', desc: 'Fetching live data' },
-    { title: 'Running analytics', desc: 'AI processing active' },
-    { title: 'Verifying data', desc: 'Cross-checking sources' },
-    { title: 'Compiling response', desc: 'Preparing detailed output' },
-  ],
-};
-
-function detectQueryType(query: string): string {
-  const q = query.toLowerCase();
-  if (/payout|disburse|utr|beneficiar/.test(q)) return 'payout';
-  if (/bank|psp|latency|health|hdfc|icici|sbi|axis|yes bank|kotak/.test(q)) return 'bank';
-  if (/fraud|anomal|suspicious|risk|chargeback|dispute/.test(q)) return 'fraud';
-  if (/settle|reconcil|neft|imps|clearing/.test(q)) return 'settlement';
-  if (/transaction|txn|payment|rrn|volume|tps/.test(q)) return 'transaction';
-  return 'general';
-}
 
 // ─── Metric / record parsers ──────────────────────────────────────────────────
 
@@ -461,10 +411,28 @@ export function ChatPage({ token }: ChatPageProps) {
   const [showVoiceModal, setShowVoiceModal] = useState(false);
   const [voiceDraft, setVoiceDraft] = useState('');
 
-  // AI Operations panel state
-  const [opSteps, setOpSteps] = useState<OpStep[]>([]);
-  const [lastOpTime, setLastOpTime] = useState<Date | null>(null);
-  const [leftTab, setLeftTab] = useState<'operations' | 'history'>('operations');
+  // ── Persistence, background jobs, stop generation, edit/resend ──
+  const {
+    persistedConvId,
+    persistedDraft,
+    setActiveConvId: persistConvId,
+    saveDraft,
+    clearDraft,
+    broadcastMessage,
+  } = useConversationPersistence();
+
+  // Feature 5: stop generation
+  const pendingJobIdRef = useRef<string | null>(null);
+  const syncAbortRef = useRef<AbortController | null>(null);
+
+  // Feature 6: edit & resend
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState('');
+
+  // Feature 7: "completed while you were away" banner
+  const [completedWhileAway, setCompletedWhileAway] = useState(false);
+  const isPageVisibleRef = useRef(true);
+
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -489,62 +457,39 @@ export function ChatPage({ token }: ChatPageProps) {
     onInterim: (text) => setVoiceDraft(text),
   });
 
-  const { streamState, startStream, endStream } = useAiStream(token);
+  // Feature 1: background job completion → update UI even after tab-switch
+  const onJobComplete = useCallback((event: AiJobCompleteEvent) => {
+    pendingJobIdRef.current = null;
+    const assistantMsg: ChatMessage = {
+      id: event.messageId,
+      role: 'assistant',
+      content: event.reply,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, assistantMsg]);
+    setLoading(false);
 
-  // Sync streamState steps → AI Operations panel
-  useEffect(() => {
-    if (!loading) return;
-    if (streamState.steps.length === 0) return;
-    const now = new Date();
-    setOpSteps(streamState.steps.map((step, i) => ({
-      title: step,
-      desc: i === streamState.steps.length - 1 && streamState.activeTools.length > 0
-        ? `Using: ${humanizeTool(streamState.activeTools[0])}`
-        : 'Processing...',
-      timestamp: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      status: i < streamState.steps.length - 1 ? 'done' : 'active',
-    })));
-  }, [streamState.steps, streamState.activeTools, loading]);
+    // Feature 7: show banner if user was away
+    if (!isPageVisibleRef.current) {
+      setCompletedWhileAway(true);
+    }
 
-  // Init timer-based steps when loading starts (fallback when no SSE steps)
-  useEffect(() => {
-    if (!loading || !pendingQuery) return;
-    const qType = detectQueryType(pendingQuery);
-    const stepDefs = OP_STEPS[qType] ?? OP_STEPS.general;
-    const now = new Date();
+    // Feature 11: broadcast to other tabs
+    broadcastMessage({ type: 'response_received', conversationId: event.conversationId });
+  }, [broadcastMessage]);
 
-    setOpSteps(stepDefs.map((s, i) => ({
-      ...s,
-      timestamp: new Date(now.getTime() + i * 1200)
-        .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      status: i === 0 ? 'active' : 'pending',
-    })));
+  const onJobFailed = useCallback((event: AiJobFailedEvent) => {
+    pendingJobIdRef.current = null;
+    setMessages(prev => [...prev, {
+      id: randomId(), role: 'assistant',
+      content: `Error: ${event.error}`,
+      timestamp: new Date(),
+    }]);
+    setLoading(false);
+  }, []);
 
-    let idx = 0;
-    const interval = setInterval(() => {
-      idx++;
-      setOpSteps(prev => {
-        if (streamState.steps.length > 0) { clearInterval(interval); return prev; }
-        return prev.map((s, i) => ({
-          ...s,
-          status: i < idx ? 'done' : i === idx ? 'active' : 'pending',
-        }));
-      });
-      if (idx >= stepDefs.length - 1) clearInterval(interval);
-    }, 1500);
+  const { streamState, startStream, endStream } = useAiStream(token, onJobComplete, onJobFailed);
 
-    return () => clearInterval(interval);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, pendingQuery]);
-
-  // Mark all done when loading ends
-  useEffect(() => {
-    if (loading) return;
-    setOpSteps(prev => {
-      if (prev.length === 0) return prev;
-      return prev.map(s => ({ ...s, status: 'done' }));
-    });
-  }, [loading]);
 
   useEffect(() => {
     if (!isListening && showVoiceModal) {
@@ -583,6 +528,29 @@ export function ChatPage({ token }: ChatPageProps) {
 
   useEffect(() => { void loadConversations(); }, [loadConversations]);
 
+  // Feature 3 & 4: restore last active conversation on mount
+  useEffect(() => {
+    if (persistedConvId && !activeConvId) {
+      void openConversation(persistedConvId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [persistedConvId]);
+
+  // Feature 10: restore draft on mount
+  useEffect(() => {
+    if (persistedDraft && !input) {
+      setInput(persistedDraft);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Feature 7: track page visibility for "completed while away" banner
+  useEffect(() => {
+    const onVisible = () => { isPageVisibleRef.current = document.visibilityState === 'visible'; };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   const openConversation = async (id: string) => {
     if (id === activeConvId) return;
     setShowConvList(false);
@@ -590,16 +558,22 @@ export function ChatPage({ token }: ChatPageProps) {
     try {
       const res = await getConversation(id, token);
       setActiveConvId(id);
+      persistConvId(id);                          // Feature 4: persist
       setMessages(toUiMessages(res.messages));
+      setCompletedWhileAway(false);
     } catch { /* silently ignore */ } finally { setLoading(false); }
   };
 
   const startNewChat = () => {
     setActiveConvId(null);
+    persistConvId(null);                          // Feature 4: clear persisted
     setMessages([]);
     setInput('');
+    clearDraft();                                 // Feature 10: clear draft
     setShowConvList(false);
-    setOpSteps([]);
+    setCompletedWhileAway(false);
+    setEditingMessageId(null);
+    setEditContent('');
     setTimeout(() => textareaRef.current?.focus(), 50);
   };
 
@@ -630,44 +604,143 @@ export function ChatPage({ token }: ChatPageProps) {
 
   const sendMessage = async (text: string) => {
     if (!text.trim() || loading) return;
-    const userMsg: ChatMessage = { id: randomId(), role: 'user', content: text.trim(), timestamp: new Date() };
+
+    const trimmed = text.trim();
+    const userMsg: ChatMessage = { id: randomId(), role: 'user', content: trimmed, timestamp: new Date() };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
-    setPendingQuery(text.trim());
+    clearDraft();                                 // Feature 10: clear saved draft
+    setPendingQuery(trimmed);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setLoading(true);
     startStream(activeConvId);
 
+    // ── Try background-queue first; fall back to synchronous ─────────────────
     try {
-      const res: AiChatResponse = await aiChat(text.trim(), token, activeConvId ?? undefined);
+      const queued = await queueAiChat(trimmed, token, activeConvId ?? undefined);
+
+      // Job queued — the response arrives asynchronously via Socket.io
+      pendingJobIdRef.current = queued.jobId;
+
       if (!activeConvId) {
-        setActiveConvId(res.conversationId);
+        setActiveConvId(queued.conversationId);
+        persistConvId(queued.conversationId);     // Feature 4: persist
         void loadConversations();
       } else {
         setConversations(prev =>
-          prev.map(c => c.id === res.conversationId ? { ...c, updated_at: new Date().toISOString() } : c)
+          prev.map(c => c.id === queued.conversationId
+            ? { ...c, updated_at: new Date().toISOString() }
+            : c)
             .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
         );
       }
-      const assistantMsg: ChatMessage = {
-        id: randomId(), role: 'assistant', content: res.reply,
-        toolCalls: res.toolCallsTrace?.length
-          ? res.toolCallsTrace
-          : (res.toolsUsed?.map(name => ({ name, args: {} })) ?? undefined),
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, assistantMsg]);
-    } catch (err) {
-      setMessages(prev => [...prev, {
-        id: randomId(), role: 'assistant',
-        content: `Error: ${err instanceof Error ? err.message : 'Request failed'}`,
-        timestamp: new Date(),
-      }]);
-    } finally {
+
+      // Loading stays true — cleared by onJobComplete / onJobFailed
+    } catch (queueErr) {
+      // Feature 1 fallback: if the queue endpoint is unavailable, use sync HTTP
+      pendingJobIdRef.current = null;
+      try {
+        const abortCtrl = new AbortController();
+        syncAbortRef.current = abortCtrl;
+
+        const res: AiChatResponse = await aiChat(trimmed, token, activeConvId ?? undefined);
+
+        if (!activeConvId) {
+          setActiveConvId(res.conversationId);
+          persistConvId(res.conversationId);
+          void loadConversations();
+        } else {
+          setConversations(prev =>
+            prev.map(c => c.id === res.conversationId
+              ? { ...c, updated_at: new Date().toISOString() }
+              : c)
+              .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
+          );
+        }
+
+        const assistantMsg: ChatMessage = {
+          id: randomId(), role: 'assistant', content: res.reply,
+          toolCalls: res.toolCallsTrace?.length
+            ? res.toolCallsTrace
+            : (res.toolsUsed?.map(name => ({ name, args: {} })) ?? undefined),
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+      } catch (syncErr) {
+        if ((syncErr as Error)?.name !== 'AbortError') {
+          setMessages(prev => [...prev, {
+            id: randomId(), role: 'assistant',
+            content: `Error: ${syncErr instanceof Error ? syncErr.message : String(queueErr)}`,
+            timestamp: new Date(),
+          }]);
+        }
+      } finally {
+        syncAbortRef.current = null;
+        setLoading(false);
+        endStream();
+        setPendingQuery('');
+      }
+    }
+  };
+
+  // Feature 5: stop generation
+  const stopGeneration = async () => {
+    if (pendingJobIdRef.current) {
+      try { await cancelAiJob(pendingJobIdRef.current, token); } catch { /* ignore */ }
+      pendingJobIdRef.current = null;
+    }
+    syncAbortRef.current?.abort();
+    syncAbortRef.current = null;
+
+    setMessages(prev => [...prev, {
+      id: randomId(), role: 'assistant',
+      content: 'Generation stopped.',
+      timestamp: new Date(),
+    }]);
+    setLoading(false);
+    endStream();
+    setPendingQuery('');
+  };
+
+  // Feature 6: start editing a message
+  const startEditMessage = (msg: ChatMessage) => {
+    setEditingMessageId(msg.id);
+    setEditContent(msg.content);
+  };
+
+  const cancelEditMessage = () => {
+    setEditingMessageId(null);
+    setEditContent('');
+  };
+
+  // Feature 6: submit edited message
+  const submitEditMessage = async () => {
+    if (!editingMessageId || !editContent.trim() || loading) return;
+    const trimmed = editContent.trim();
+
+    // Optimistically remove messages after the edited one
+    setMessages(prev => {
+      const idx = prev.findIndex(m => m.id === editingMessageId);
+      if (idx === -1) return prev;
+      const updated = [...prev];
+      updated[idx] = { ...updated[idx], content: trimmed };
+      return updated.slice(0, idx + 1);
+    });
+
+    setEditingMessageId(null);
+    setEditContent('');
+    setPendingQuery(trimmed);
+    setLoading(true);
+    startStream(activeConvId);
+
+    try {
+      const result = await editMessageApi(editingMessageId ?? '', trimmed, token);
+      pendingJobIdRef.current = result.jobId;
+      // Response arrives via ai:job_complete Socket.io event
+    } catch {
+      // Fallback: just resend as new message
       setLoading(false);
-      endStream();
-      setPendingQuery('');
-      setLastOpTime(new Date());
+      void sendMessage(trimmed);
     }
   };
 
@@ -748,190 +821,6 @@ export function ChatPage({ token }: ChatPageProps) {
       {/* ── Main layout ── */}
       <div className="flex flex-1 h-full overflow-hidden">
 
-        {/* ── AI Operations Panel (desktop) ── */}
-        <aside className="hidden md:flex w-[270px] flex-shrink-0 bg-white border-r border-[#EBEBEB] flex-col overflow-hidden">
-
-          {/* Panel header */}
-          <div className="px-4 pt-4 pb-0 border-b border-[#EBEBEB] flex-shrink-0">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-bold text-[#1a1a2e]">
-                {leftTab === 'operations' ? 'AI Operations' : 'History'}
-              </span>
-              {leftTab === 'operations' && (
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded border
-                  ${loading ? 'bg-red-50 text-red-600 border-red-100' : 'bg-gray-50 text-gray-400 border-gray-100'}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${loading ? 'bg-red-500 animate-pulse' : 'bg-gray-300'}`} />
-                  {loading ? 'LIVE' : 'IDLE'}
-                </span>
-              )}
-            </div>
-            {/* Tabs */}
-            <div className="flex gap-0">
-              <button
-                onClick={() => setLeftTab('operations')}
-                className={`flex-1 py-2 text-[11px] font-semibold border-b-2 transition-colors
-                  ${leftTab === 'operations'
-                    ? 'border-brand text-brand'
-                    : 'border-transparent text-gray-400 hover:text-gray-600'}`}
-              >
-                Operations
-              </button>
-              <button
-                onClick={() => setLeftTab('history')}
-                className={`flex-1 py-2 text-[11px] font-semibold border-b-2 transition-colors
-                  ${leftTab === 'history'
-                    ? 'border-brand text-brand'
-                    : 'border-transparent text-gray-400 hover:text-gray-600'}`}
-              >
-                History
-                {conversations.length > 0 && (
-                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-gray-100 text-gray-500 text-[9px] font-bold">
-                    {conversations.length > 9 ? '9+' : conversations.length}
-                  </span>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Steps */}
-          <div className={`flex-1 overflow-y-auto px-3 py-3 space-y-1 ${leftTab !== 'operations' ? 'hidden' : ''}`}>
-            {opSteps.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-40 gap-2.5">
-                <div className="w-12 h-12 rounded-xl bg-gray-50 flex items-center justify-center">
-                  <svg className="w-6 h-6 text-gray-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                  </svg>
-                </div>
-                <p className="text-xs text-gray-300">No operations yet</p>
-                <p className="text-[10px] text-gray-200">Ask a question to begin</p>
-              </div>
-            ) : (
-              opSteps.map((step, i) => (
-                <div key={i}
-                  className={`flex items-start gap-3 p-2.5 rounded-xl transition-all duration-300
-                    ${step.status === 'active' ? 'bg-brand/5' : ''}`}>
-                  {/* Icon circle */}
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-all
-                    ${step.status === 'done' ? 'bg-brand/10' : step.status === 'active' ? 'bg-brand/20 ring-2 ring-brand/20' : 'bg-gray-50'}`}>
-                    <svg className={`w-4 h-4 ${step.status === 'pending' ? 'text-gray-200' : 'text-brand'}`}
-                      fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                  </div>
-                  {/* Text */}
-                  <div className="flex-1 min-w-0">
-                    <p className={`text-[11px] font-semibold leading-tight
-                      ${step.status === 'pending' ? 'text-gray-300' : 'text-[#1a1a2e]'}`}>
-                      {step.title}
-                    </p>
-                    <p className={`text-[10px] mt-0.5 ${step.status === 'pending' ? 'text-gray-200' : 'text-gray-400'}`}>
-                      {step.desc}
-                    </p>
-                    {step.status !== 'pending' && (
-                      <p className={`text-[10px] mt-0.5 ${step.status === 'active' ? 'text-brand' : 'text-emerald-500'}`}>
-                        {step.status === 'done' ? `✓ ${step.timestamp}` : step.timestamp}
-                      </p>
-                    )}
-                  </div>
-                  {/* Right indicator */}
-                  {step.status === 'done' && (
-                    <svg className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                    </svg>
-                  )}
-                  {step.status === 'active' && (
-                    <div className="flex items-end gap-0.5 flex-shrink-0 self-end mb-0.5">
-                      {[0, 200, 400].map(delay => (
-                        <span key={delay} className="w-1 h-1 rounded-full bg-brand animate-bounce" style={{ animationDelay: `${delay}ms` }} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-
-          {/* History tab content */}
-          {leftTab === 'history' && (
-            <div className="flex-1 overflow-y-auto py-3 px-2">
-              <div className="px-2 mb-2">
-                <button
-                  onClick={startNewChat}
-                  className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl bg-brand text-white text-xs font-semibold hover:bg-brand/90 transition-all shadow-sm shadow-brand/20"
-                >
-                  <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
-                  </svg>
-                  New Chat
-                </button>
-              </div>
-
-              {sidebarLoading && conversations.length === 0 && (
-                <div className="flex justify-center mt-8">
-                  <div className="w-5 h-5 border-2 border-gray-200 border-t-brand/50 rounded-full animate-spin" />
-                </div>
-              )}
-              {!sidebarLoading && conversations.length === 0 && (
-                <p className="text-xs text-gray-300 text-center mt-8 px-4 leading-relaxed">
-                  No conversations yet.<br />Start a new chat above.
-                </p>
-              )}
-              {conversations.map(conv => (
-                <div
-                  key={conv.id}
-                  onClick={() => void openConversation(conv.id)}
-                  className={`group mb-0.5 px-3 py-2.5 rounded-xl cursor-pointer flex items-start gap-2.5 transition-all
-                    ${activeConvId === conv.id
-                      ? 'bg-brand-50 border border-brand/15'
-                      : 'hover:bg-[#F5F5F5] border border-transparent'}`}
-                >
-                  <svg className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                  </svg>
-                  <div className="flex-1 min-w-0">
-                    <p className={`text-xs font-medium truncate leading-tight ${activeConvId === conv.id ? 'text-brand' : 'text-[#404040]'}`}>
-                      {conv.title}
-                    </p>
-                    <p className="text-[10px] text-gray-300 mt-0.5">{relativeTime(conv.updated_at)}</p>
-                  </div>
-                  <button
-                    onClick={e => void handleDelete(e, conv.id)}
-                    disabled={deletingId === conv.id}
-                    className="opacity-0 group-hover:opacity-100 p-1 rounded-lg text-gray-300 hover:text-red-400 hover:bg-red-50 transition-all flex-shrink-0"
-                    title="Delete"
-                  >
-                    {deletingId === conv.id
-                      ? <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" /></svg>
-                      : <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                    }
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Footer: Confidence + Freshness */}
-          <div className={`px-4 pt-3 pb-4 border-t border-[#EBEBEB] flex-shrink-0 space-y-3 ${leftTab !== 'operations' ? 'hidden' : ''}`}>
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[11px] font-semibold text-[#1a1a2e]">System Confidence</span>
-                <span className="text-[11px] font-bold text-[#1a1a2e]">98.7%</span>
-              </div>
-              <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div className="h-full rounded-full bg-emerald-500 transition-all duration-1000" style={{ width: '98.7%' }} />
-              </div>
-            </div>
-            <div>
-              <p className="text-[11px] font-semibold text-[#1a1a2e]">Data Freshness</p>
-              <p className="text-[10px] text-gray-500 mt-0.5">
-                {lastOpTime ? relativeTime(lastOpTime.toISOString()) : '—'}
-              </p>
-              <p className="text-[10px] text-gray-400">Live from production</p>
-            </div>
-          </div>
-        </aside>
-
         {/* ── Chat Area ── */}
         <div className="flex flex-col flex-1 min-w-0 bg-[#FAFAFA]">
 
@@ -1000,6 +889,25 @@ export function ChatPage({ token }: ChatPageProps) {
           {/* ── Messages ── */}
           <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6">
 
+            {/* Feature 7: "Completed while you were away" banner */}
+            {completedWhileAway && (
+              <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-xl bg-emerald-50 border border-emerald-100 text-xs text-emerald-700 font-medium">
+                <svg className="w-4 h-4 text-emerald-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Response completed while you were away.
+                <button
+                  type="button"
+                  onClick={() => setCompletedWhileAway(false)}
+                  className="ml-auto text-emerald-400 hover:text-emerald-600 transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            )}
+
             {/* Welcome / empty state */}
             {messages.length === 0 && !loading && (
               <div className="max-w-2xl mx-auto pt-6">
@@ -1052,9 +960,52 @@ export function ChatPage({ token }: ChatPageProps) {
                   </div>
 
                   {msg.role === 'user' ? (
-                    <div className="bg-brand text-white rounded-2xl rounded-tr-sm px-5 py-3.5 text-sm leading-relaxed shadow-lg shadow-brand/25 whitespace-pre-wrap">
-                      {msg.content}
-                    </div>
+                    editingMessageId === msg.id ? (
+                      /* Feature 6: inline edit form */
+                      <div className="w-full max-w-2xl">
+                        <textarea
+                          value={editContent}
+                          onChange={e => setEditContent(e.target.value)}
+                          rows={3}
+                          className="w-full px-4 py-3 text-sm text-[#404040] border border-brand/40 rounded-2xl focus:outline-none focus:ring-2 focus:ring-brand/20 resize-none bg-white shadow-inner"
+                          autoFocus
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submitEditMessage(); }
+                            if (e.key === 'Escape') cancelEditMessage();
+                          }}
+                        />
+                        <div className="flex items-center gap-2 mt-2 justify-end">
+                          <button type="button" onClick={cancelEditMessage}
+                            className="text-xs text-gray-400 hover:text-gray-600 px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 transition-all">
+                            Cancel
+                          </button>
+                          <button type="button" onClick={() => void submitEditMessage()} disabled={!editContent.trim() || loading}
+                            className="text-xs text-white bg-brand hover:bg-brand/90 px-3 py-1.5 rounded-lg disabled:bg-gray-200 transition-all">
+                            Send
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="group/msg relative">
+                        <div className="bg-brand text-white rounded-2xl rounded-tr-sm px-5 py-3.5 text-sm leading-relaxed shadow-lg shadow-brand/25 whitespace-pre-wrap">
+                          {msg.content}
+                        </div>
+                        {/* Feature 6: edit button — show on hover, only on last user message when not loading */}
+                        {!loading && messages[messages.length - 1]?.id === msg.id && (
+                          <button
+                            type="button"
+                            onClick={() => startEditMessage(msg)}
+                            title="Edit message"
+                            className="absolute -bottom-6 right-0 opacity-0 group-hover/msg:opacity-100 flex items-center gap-1 text-[10px] text-gray-400 hover:text-brand transition-all px-2 py-0.5 rounded-lg hover:bg-brand-50"
+                          >
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                            </svg>
+                            Edit
+                          </button>
+                        )}
+                      </div>
+                    )
                   ) : (
                     <div className="bg-white border border-[#EBEBEB] rounded-2xl rounded-tl-sm px-5 py-4 shadow-sm min-w-0 w-full">
                       <MessageContent content={msg.content} />
@@ -1136,12 +1087,16 @@ export function ChatPage({ token }: ChatPageProps) {
                 <textarea
                   ref={textareaRef}
                   value={input}
-                  onChange={e => { setInput(e.target.value); autoResizeTextarea(e.target); }}
+                  onChange={e => {
+                    setInput(e.target.value);
+                    autoResizeTextarea(e.target);
+                    saveDraft(e.target.value);   // Feature 10: autosave draft
+                  }}
                   onKeyDown={handleKeyDown}
-                  disabled={loading}
+                  disabled={loading || !!editingMessageId}
                   rows={2}
-                  placeholder="Ask about transactions, analytics, bank health, settlements..."
-                  className="w-full px-4 pt-4 pb-2 text-sm text-[#404040] placeholder-gray-300 bg-transparent focus:outline-none disabled:opacity-50 resize-none leading-relaxed"
+                  placeholder={loading ? 'Processing...' : 'Ask about transactions, analytics, bank health, settlements...'}
+                  className="w-full px-4 pt-4 pb-2 text-sm text-[#404040] placeholder-gray-300 bg-transparent focus:outline-none disabled:opacity-40 resize-none leading-relaxed"
                   style={{ minHeight: '56px', maxHeight: '160px' }}
                 />
 
@@ -1184,14 +1139,28 @@ export function ChatPage({ token }: ChatPageProps) {
 
                   <div className="flex-1" />
 
-                  {/* Send button (round) */}
-                  <button type="submit" disabled={loading || !input.trim()}
-                    className="w-9 h-9 bg-brand rounded-full flex items-center justify-center text-white shadow-md shadow-brand/30
-                               hover:bg-brand/90 disabled:bg-gray-200 disabled:shadow-none transition-all active:scale-95">
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                    </svg>
-                  </button>
+                  {/* Feature 5: Stop Generation button (shown during processing) */}
+                  {loading ? (
+                    <button
+                      type="button"
+                      onClick={() => void stopGeneration()}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-red-500 bg-red-50 border border-red-100 hover:bg-red-100 transition-all"
+                    >
+                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 6h12v12H6z" />
+                      </svg>
+                      Stop
+                    </button>
+                  ) : (
+                    /* Send button (round) */
+                    <button type="submit" disabled={!input.trim()}
+                      className="w-9 h-9 bg-brand rounded-full flex items-center justify-center text-white shadow-md shadow-brand/30
+                                 hover:bg-brand/90 disabled:bg-gray-200 disabled:shadow-none transition-all active:scale-95">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               </div>
             </form>

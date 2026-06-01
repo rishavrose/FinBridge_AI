@@ -370,6 +370,45 @@ INSERT IGNORE INTO dashboard_widgets (widget_key, display_label, tool_name, args
    JSON_OBJECT('status', 'status'),
    'Sample of last 100 rows to compute status mix client-side.');
 
+-- ────────────────────────────────────────────────────────────────────────────
+-- Conversation Persistence & Background Processing Tables
+-- ────────────────────────────────────────────────────────────────────────────
+
+-- AI Jobs — tracks background AI processing tasks (Feature 1, 9)
+CREATE TABLE IF NOT EXISTS ai_jobs (
+  id              VARCHAR(36)   NOT NULL PRIMARY KEY,
+  conversation_id VARCHAR(36)   NOT NULL,
+  user_id         VARCHAR(255)  NOT NULL,
+  message_id      VARCHAR(36)   NOT NULL COMMENT 'The user chat_messages row this job answers',
+  status          ENUM('PENDING','PROCESSING','COMPLETED','FAILED','CANCELLED') NOT NULL DEFAULT 'PENDING',
+  result_message_id VARCHAR(36) COMMENT 'The assistant chat_messages row when completed',
+  error_message   TEXT,
+  created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  completed_at    DATETIME,
+  INDEX idx_aj_conversation_id (conversation_id),
+  INDEX idx_aj_user_id         (user_id),
+  INDEX idx_aj_status          (status),
+  INDEX idx_aj_created_at      (created_at),
+  FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Background AI processing job tracking';
+
+GRANT INSERT, UPDATE, DELETE ON finbridge_db.ai_jobs TO 'finbridge_readonly'@'%';
+
+-- Message Versions — audit history for edited messages (Feature 6)
+CREATE TABLE IF NOT EXISTS message_versions (
+  id           VARCHAR(36)              NOT NULL PRIMARY KEY,
+  message_id   VARCHAR(36)              NOT NULL,
+  version      INT                      NOT NULL DEFAULT 1,
+  role         ENUM('user','assistant') NOT NULL,
+  content      TEXT                     NOT NULL,
+  edited_at    DATETIME                 NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_mv_message_id (message_id),
+  INDEX idx_mv_version    (version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Edit history for chat messages';
+
+GRANT INSERT ON finbridge_db.message_versions TO 'finbridge_readonly'@'%';
+
 INSERT IGNORE INTO bank_health (bank_code, bank_name, status, success_rate_24h, avg_response_ms, total_requests_24h, failed_requests_24h) VALUES
   ('GTB',     'Guaranty Trust Bank',   'operational', 99.87, 312,  45820, 60),
   ('ACCESS',  'Access Bank',           'operational', 98.92, 485,  32100, 353),

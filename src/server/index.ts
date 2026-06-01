@@ -32,6 +32,7 @@ import { listStoredConnections, generateToolsForConnection } from '../database/c
 import { toolRegistry } from '../mcp/registry.js';
 import { ensureQdrantCollection } from '../ai/vector/client.js';
 import { startAiLearningWorker, closeAiWorkers } from '../ai/workers/index.js';
+import { startAiProcessingWorker, closeAiProcessingWorker } from '../workers/ai-processing.js';
 
 // Routes
 import { healthRoutes } from './routes/health.js';
@@ -41,6 +42,7 @@ import { authRoutes } from './routes/auth.js';
 import { chatHistoryRoutes } from './routes/chat.js';
 import { dbRoutes } from './routes/db.js';
 import { aiChatRoutes } from './routes/ai-chat.js';
+import { aiJobRoutes } from './routes/ai-jobs.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { alertRoutes } from './routes/alerts.js';
 import { aiRateLimitRoutes } from './routes/ai-rate-limit.js';
@@ -173,6 +175,7 @@ export async function buildServer() {
   await fastify.register(chatHistoryRoutes);
   await fastify.register(dbRoutes);
   await fastify.register(aiChatRoutes);
+  await fastify.register(aiJobRoutes);
   await fastify.register(analyticsRoutes);
   await fastify.register(alertRoutes);
   await fastify.register(aiRateLimitRoutes);
@@ -243,7 +246,11 @@ async function main() {
   startAiLearningWorker();
   logger.info('✅ AI learning worker started');
 
-  // 5b. Bootstrap Qdrant collection (non-blocking — errors logged and swallowed)
+  // 5b. Start AI background processing worker
+  startAiProcessingWorker();
+  logger.info('✅ AI processing worker started');
+
+  // 5c. Bootstrap Qdrant collection (non-blocking — errors logged and swallowed)
   ensureQdrantCollection()
     .then(() => logger.info('✅ Qdrant collection ready'))
     .catch((err) => logger.warn({ err }, '⚠️  Qdrant init failed — AI memory disabled'));
@@ -271,6 +278,7 @@ async function main() {
       await stopAnalyticsWorkers();
       await closeQueues();
       await closeAiWorkers();
+      await closeAiProcessingWorker();
       await closePool();
       await closeRedis();
       logger.info('Graceful shutdown complete');

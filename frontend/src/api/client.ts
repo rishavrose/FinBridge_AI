@@ -473,6 +473,70 @@ export async function sendMcpMessage(
   }
 }
 
+// ─── Background AI Jobs — Features 1, 5, 6, 9 ───────────────────────────────
+
+export interface QueueAiChatResult {
+  jobId: string;
+  conversationId: string;
+  userMessageId: string;
+  status: 'PENDING';
+}
+
+export interface AiJobStatus {
+  jobId: string;
+  conversationId: string;
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  error: string | null;
+  result: { messageId: string; content: string; createdAt: string } | null;
+}
+
+/** Queue a message for background AI processing. Returns immediately. */
+export async function queueAiChat(
+  message: string,
+  token: string,
+  conversationId?: string,
+  systemPrompt?: string,
+): Promise<QueueAiChatResult> {
+  return apiFetch<QueueAiChatResult>('/ai/chat/queue', {
+    method: 'POST',
+    body: JSON.stringify({
+      message,
+      ...(conversationId ? { conversationId } : {}),
+      ...(systemPrompt ? { systemPrompt } : {}),
+    }),
+  }, token);
+}
+
+/** Poll status of a background AI job. */
+export async function getAiJobStatus(jobId: string, token: string): Promise<AiJobStatus> {
+  return apiFetch<AiJobStatus>(`/ai/chat/jobs/${encodeURIComponent(jobId)}`, {}, token);
+}
+
+/** Cancel a background AI job. */
+export async function cancelAiJob(jobId: string, token: string): Promise<{ jobId: string; status: 'CANCELLED' }> {
+  return apiFetch<{ jobId: string; status: 'CANCELLED' }>(
+    `/ai/chat/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+/** Edit a sent message and re-queue AI response. */
+export async function editMessage(
+  messageId: string,
+  content: string,
+  token: string,
+): Promise<{ jobId: string; conversationId: string; messageId: string; status: 'PENDING' }> {
+  return apiFetch(
+    `/chat/messages/${encodeURIComponent(messageId)}/edit`,
+    { method: 'POST', body: JSON.stringify({ content }) },
+    token,
+  );
+}
+
 // ─── AI Memory / Semantic Cache (admin only) ─────────────────────────────────
 
 /**

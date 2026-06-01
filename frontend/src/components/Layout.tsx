@@ -99,61 +99,6 @@ export function Layout({ claims, activePage, onNavigate, onLogout, children }: L
       ],
     },
     {
-      title: 'OPERATIONS',
-      items: [
-        {
-          id: 'analytics' as Page,
-          label: 'Payouts',
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-                d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
-            </svg>
-          ),
-        },
-        {
-          id: 'analytics' as Page,
-          label: 'UPI Transactions',
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-                d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-            </svg>
-          ),
-        },
-        {
-          id: 'analytics' as Page,
-          label: 'Settlements',
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-                d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-            </svg>
-          ),
-        },
-        {
-          id: 'analytics' as Page,
-          label: 'Bank Health',
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-                d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3" />
-            </svg>
-          ),
-        },
-        {
-          id: 'analytics' as Page,
-          label: 'Disputes',
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
-                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          ),
-        },
-      ],
-    },
-    {
       title: 'ADMIN',
       items: [
         {
@@ -258,13 +203,6 @@ export function Layout({ claims, activePage, onNavigate, onLogout, children }: L
                 {section.title}
               </p>
               {visibleItems.map((item, idx) => {
-                const isActive = activePage === item.id &&
-                  !(section.title === 'OPERATIONS' && item.label !== 'Bank Health') &&
-                  !(section.title === 'ADMIN' && item.label === 'Audit Logs' && activePage !== 'ai-memory') &&
-                  !(section.title === 'ADMIN' && item.label === 'System Settings' && activePage !== 'dashboard-settings');
-
-                // For nav items that are visual-only duplicates (OPERATIONS section all point to analytics)
-                // detect active state differently
                 const isNavActive = activePage === item.id;
 
                 return (
@@ -369,7 +307,7 @@ export function Layout({ claims, activePage, onNavigate, onLogout, children }: L
           <span className="ml-auto text-white/70 text-xs capitalize">{activePage}</span>
         </div>
 
-        <main className="flex-1 overflow-hidden bg-[#F7F8FA]">
+        <main className="flex-1 overflow-y-auto bg-[#F7F8FA]">
           {children}
         </main>
       </div>
