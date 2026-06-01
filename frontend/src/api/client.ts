@@ -21,6 +21,16 @@ import type {
 
 const API_BASE = ((import.meta as any).env?.VITE_API_URL as string | undefined) ?? '';
 
+const SAFE_CLIENT_ERROR_CODES = new Set([
+  'RATE_LIMIT_EXCEEDED',
+  'AUTHENTICATION_ERROR',
+  'AUTHORIZATION_ERROR',
+  'VALIDATION_ERROR',
+  'NOT_FOUND',
+  'OPENAI_NOT_CONFIGURED',
+  'AI_DISABLED',
+]);
+
 async function apiFetch<T>(
   path: string,
   options: RequestInit = {},
@@ -37,17 +47,38 @@ async function apiFetch<T>(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  } catch {
+    // Network-level failure (offline, DNS, CORS, etc.)
+    throw new Error('Unable to reach the server. Please check your connection and try again.');
+  }
 
   if (!res.ok) {
-    let message = `HTTP ${res.status}`;
+    let message = '';
+    let code = '';
     try {
-      const body = await res.json() as { message?: string; error?: string };
-      message = body.message ?? body.error ?? message;
+      const body = await res.json() as { message?: string; error?: string; code?: string };
+      message = body.message ?? body.error ?? '';
+      code = body.code ?? '';
     } catch {
       // ignore parse error
     }
-    throw new Error(message);
+
+    // Only surface user-safe codes or specific HTTP statuses
+    if (SAFE_CLIENT_ERROR_CODES.has(code) && message) {
+      throw new Error(message);
+    }
+    if (res.status === 401) throw new Error('Session expired. Please log in again.');
+    if (res.status === 403) throw new Error('You do not have permission to perform this action.');
+    if (res.status === 429) throw new Error('Too many requests — please slow down and try again.');
+    if (res.status === 404 && message) throw new Error(message);
+    if (res.status >= 500) throw new Error('Service temporarily unavailable. Please try again.');
+
+    // 4xx with message — safe to surface
+    if (message && message.length < 200) throw new Error(message);
+    throw new Error('The request could not be completed. Please try again.');
   }
 
   return res.json() as Promise<T>;

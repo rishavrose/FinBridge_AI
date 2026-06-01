@@ -46,6 +46,7 @@ import {
 } from '../realtime/socket.js';
 import type { AiProcessingJobData } from '../queue/client.js';
 import type { Role } from '../types/index.js';
+import { sanitizeErrorForUser } from '../utils/errors.js';
 
 const connection = {
   host: env.REDIS_HOST,
@@ -293,18 +294,18 @@ export function startAiProcessingWorker(): void {
           'AI processing job completed',
         );
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
+        const rawErrMsg = err instanceof Error ? err.message : String(err);
         logger.error({ err, jobId, conversationId }, 'AI processing job failed');
 
         await executeWrite(
           "UPDATE ai_jobs SET status = 'FAILED', error_message = ?, completed_at = NOW() WHERE id = ?",
-          [errMsg.slice(0, 500), jobId],
+          [rawErrMsg.slice(0, 500), jobId],
         ).catch(() => {});
 
         emitJobFailed(userId, {
           jobId,
           conversationId,
-          error: errMsg,
+          error: sanitizeErrorForUser(err),
         });
 
         throw err; // Let BullMQ record the failure

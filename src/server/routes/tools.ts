@@ -8,7 +8,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { toolRegistry } from '../../mcp/registry.js';
+import { toolRegistry, getToolHealthStats } from '../../mcp/registry.js';
 import { refreshTools } from '../../mcp/generator.js';
 import { authenticateRequest } from '../../middleware/auth.js';
 import { requireRole, checkToolPermission } from '../../middleware/permission.js';
@@ -79,6 +79,31 @@ export async function toolRoutes(fastify: FastifyInstance): Promise<void> {
         tool: name,
       });
     }
+  });
+
+  // ── Tool health stats (Rule 9 + 14) ─────────────────────────────────────────
+  fastify.get('/tools/health', {
+    schema: {
+      tags: ['Tools'],
+      summary: 'MCP tool health — success rate, latency, retries',
+      description:
+        'Returns in-process health counters for every MCP tool that has been called ' +
+        'since the server started. Resets on restart.',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [authenticateRequest],
+  }, async () => {
+    const stats = getToolHealthStats();
+    const totalCalls = stats.reduce((n, s) => n + s.totalCallCount, 0);
+    const totalFailures = stats.reduce((n, s) => n + s.failureCount, 0);
+    const overallSuccessRate = totalCalls === 0 ? 1 : +((totalCalls - totalFailures) / totalCalls).toFixed(4);
+    return {
+      overallSuccessRate,
+      totalCallCount: totalCalls,
+      totalFailureCount: totalFailures,
+      tools: stats,
+      generatedAt: new Date().toISOString(),
+    };
   });
 
   // ── Refresh tools from schema ─────────────────────────────────────────────────

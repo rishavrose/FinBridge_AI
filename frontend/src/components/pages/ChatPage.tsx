@@ -17,6 +17,21 @@ import type { AiJobCompleteEvent, AiJobFailedEvent } from '../../hooks/useAiStre
 import { humanizeTool } from '../../hooks/useAiStream';
 import { useConversationPersistence } from '../../hooks/useConversationPersistence';
 
+// ─── Client-side error sanitizer ─────────────────────────────────────────────
+
+const INTERNAL_ERROR_RE = /NetworkError|FetchError|ECONNRESET|ETIMEDOUT|ECONNREFUSED|Failed to fetch|Load failed|fetch|TypeError|ReferenceError|at Object\.|\.ts:\d|\.js:\d|redis|qdrant|bullmq/i;
+
+function sanitizeClientError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  if (!msg || INTERNAL_ERROR_RE.test(msg)) {
+    return 'Unable to retrieve the requested data right now. Please try again.';
+  }
+  if (msg.length > 200 || msg.includes('\n') || msg.includes('  at ')) {
+    return 'Unable to complete the analysis. Please try again.';
+  }
+  return msg;
+}
+
 interface ChatPageProps {
   token: string;
 }
@@ -480,9 +495,10 @@ export function ChatPage({ token }: ChatPageProps) {
 
   const onJobFailed = useCallback((event: AiJobFailedEvent) => {
     pendingJobIdRef.current = null;
+    const safeError = sanitizeClientError(event.error);
     setMessages(prev => [...prev, {
       id: randomId(), role: 'assistant',
-      content: `Error: ${event.error}`,
+      content: safeError,
       timestamp: new Date(),
     }]);
     setLoading(false);
@@ -616,6 +632,9 @@ export function ChatPage({ token }: ChatPageProps) {
     startStream(activeConvId);
 
     // ── Try background-queue first; fall back to synchronous ─────────────────
+    // NOTE: The sync endpoint (/ai/chat/message) may return requiresBackground:true
+    // for heavy queries — in that case we immediately re-queue via the background
+    // path and let Socket.io deliver the result.
     try {
       const queued = await queueAiChat(trimmed, token, activeConvId ?? undefined);
 
@@ -643,7 +662,21 @@ export function ChatPage({ token }: ChatPageProps) {
         const abortCtrl = new AbortController();
         syncAbortRef.current = abortCtrl;
 
-        const res: AiChatResponse = await aiChat(trimmed, token, activeConvId ?? undefined);
+        const res: AiChatResponse & { requiresBackground?: boolean } =
+          await aiChat(trimmed, token, activeConvId ?? undefined);
+
+        // Rule 4/5: server detected a heavy query — silently re-queue it
+        if ((res as { requiresBackground?: boolean }).requiresBackground) {
+          const requeued = await queueAiChat(trimmed, token, res.conversationId ?? activeConvId ?? undefined);
+          pendingJobIdRef.current = requeued.jobId;
+          if (!activeConvId) {
+            setActiveConvId(requeued.conversationId);
+            persistConvId(requeued.conversationId);
+            void loadConversations();
+          }
+          // Loading stays true — cleared by onJobComplete / onJobFailed
+          return;
+        }
 
         if (!activeConvId) {
           setActiveConvId(res.conversationId);
@@ -670,7 +703,7 @@ export function ChatPage({ token }: ChatPageProps) {
         if ((syncErr as Error)?.name !== 'AbortError') {
           setMessages(prev => [...prev, {
             id: randomId(), role: 'assistant',
-            content: `Error: ${syncErr instanceof Error ? syncErr.message : String(queueErr)}`,
+            content: sanitizeClientError(syncErr),
             timestamp: new Date(),
           }]);
         }

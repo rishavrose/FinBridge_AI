@@ -19,6 +19,49 @@ import { auditToolCall, auditToolSuccess, auditToolError } from '../audit/logger
 import { logger } from '../utils/logger.js';
 import { createHash } from 'crypto';
 
+// ─── Retry helpers ────────────────────────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('econnrefused') ||
+    msg.includes('network') ||
+    msg.includes('timeout') ||
+    msg.includes('socket hang up') ||
+    msg.includes('read econnreset') ||
+    msg.includes('epipe')
+  );
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  toolName: string,
+  maxAttempts = 3,
+  baseDelayMs = 400,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableError(err) || attempt === maxAttempts) throw err;
+      const delay = baseDelayMs * Math.pow(2, attempt - 1); // 400ms, 800ms
+      logger.warn({ tool: toolName, attempt, delayMs: delay }, 'Tool call failed — retrying');
+      recordToolRetry(toolName); // Rule 14: track retry count
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
+}
+
 // ─── Handler type ─────────────────────────────────────────────────────────────
 
 export type ToolHandler = (
@@ -29,6 +72,84 @@ export type ToolHandler = (
 interface RegisteredTool {
   definition: McpToolDefinition;
   handler: ToolHandler;
+}
+
+// ─── Tool health stats (Rules 9 + 14) ────────────────────────────────────────
+
+export interface ToolHealthSnapshot {
+  tool: string;
+  successCount: number;
+  failureCount: number;
+  retryCount: number;
+  timeoutCount: number;
+  totalCallCount: number;
+  successRate: number;     // 0–1
+  avgLatencyMs: number;
+  p95LatencyMs: number;
+}
+
+interface ToolStatsEntry {
+  successCount: number;
+  failureCount: number;
+  retryCount: number;
+  timeoutCount: number;
+  latencies: number[];     // keep last 200 samples for percentile calc
+}
+
+const _toolStats = new Map<string, ToolStatsEntry>();
+
+function getOrCreateStats(name: string): ToolStatsEntry {
+  if (!_toolStats.has(name)) {
+    _toolStats.set(name, { successCount: 0, failureCount: 0, retryCount: 0, timeoutCount: 0, latencies: [] });
+  }
+  return _toolStats.get(name)!;
+}
+
+function recordToolSuccess(name: string, durationMs: number): void {
+  const s = getOrCreateStats(name);
+  s.successCount++;
+  s.latencies.push(durationMs);
+  if (s.latencies.length > 200) s.latencies.shift();
+}
+
+function recordToolFailure(name: string, durationMs: number, isTimeout = false): void {
+  const s = getOrCreateStats(name);
+  s.failureCount++;
+  if (isTimeout) s.timeoutCount++;
+  s.latencies.push(durationMs);
+  if (s.latencies.length > 200) s.latencies.shift();
+}
+
+function recordToolRetry(name: string): void {
+  getOrCreateStats(name).retryCount++;
+}
+
+function p95(latencies: number[]): number {
+  if (latencies.length === 0) return 0;
+  const sorted = [...latencies].sort((a, b) => a - b);
+  const idx = Math.ceil(sorted.length * 0.95) - 1;
+  return sorted[Math.max(0, idx)];
+}
+
+/** Returns a health snapshot for every registered tool that has been called. */
+export function getToolHealthStats(): ToolHealthSnapshot[] {
+  return [..._toolStats.entries()].map(([tool, s]) => {
+    const total = s.successCount + s.failureCount;
+    const avg = s.latencies.length
+      ? Math.round(s.latencies.reduce((a, b) => a + b, 0) / s.latencies.length)
+      : 0;
+    return {
+      tool,
+      successCount: s.successCount,
+      failureCount: s.failureCount,
+      retryCount: s.retryCount,
+      timeoutCount: s.timeoutCount,
+      totalCallCount: total,
+      successRate: total === 0 ? 1 : +(s.successCount / total).toFixed(4),
+      avgLatencyMs: avg,
+      p95LatencyMs: Math.round(p95(s.latencies)),
+    };
+  }).sort((a, b) => b.totalCallCount - a.totalCallCount);
 }
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
@@ -126,12 +247,15 @@ class ToolRegistry {
       try {
         const { data, cached } = await getOrSet(
           cacheKey,
-          () => entry.handler(rawArgs, ctx) as Promise<unknown>,
+          () => withRetry(() => entry.handler(rawArgs, ctx) as Promise<unknown>, name),
           { ttl: cacheTtl, tags: [`tool:${name}`] },
         );
 
         const durationMs = Date.now() - start;
-        if (!cached) auditToolSuccess(auditCtx, name, durationMs);
+        if (!cached) {
+          auditToolSuccess(auditCtx, name, durationMs);
+          recordToolSuccess(name, durationMs);
+        }
 
         return {
           data,
@@ -143,15 +267,17 @@ class ToolRegistry {
         const durationMs = Date.now() - start;
         const errorCode = (err as Error).name;
         auditToolError(auditCtx, name, errorCode, durationMs);
+        recordToolFailure(name, durationMs, errorCode === 'ETIMEDOUT' || errorCode === 'TimeoutError');
         throw err;
       }
     }
 
-    // 5. No cache — execute directly
+    // 5. No cache — execute with retry
     try {
-      const data = await entry.handler(rawArgs, ctx);
+      const data = await withRetry(() => entry.handler(rawArgs, ctx), name);
       const durationMs = Date.now() - start;
       auditToolSuccess(auditCtx, name, durationMs, Array.isArray(data) ? data.length : undefined);
+      recordToolSuccess(name, durationMs);
 
       return {
         data,
@@ -161,7 +287,9 @@ class ToolRegistry {
       };
     } catch (err) {
       const durationMs = Date.now() - start;
-      auditToolError(auditCtx, name, (err as Error).name, durationMs);
+      const errorCode = (err as Error).name;
+      auditToolError(auditCtx, name, errorCode, durationMs);
+      recordToolFailure(name, durationMs, errorCode === 'ETIMEDOUT' || errorCode === 'TimeoutError');
       throw err;
     }
   }

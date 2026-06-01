@@ -108,3 +108,58 @@ export function isAppError(err: unknown): err is AppError {
 export function isOperationalError(err: unknown): boolean {
   return isAppError(err) && err.isOperational;
 }
+
+// ─── User-safe error sanitizer ───────────────────────────────────────────────
+
+const INTERNAL_ERROR_PATTERNS = [
+  /NetworkError/i,
+  /FetchError/i,
+  /ECONNRESET/i,
+  /ETIMEDOUT/i,
+  /ECONNREFUSED/i,
+  /EHOSTUNREACH/i,
+  /ENOTFOUND/i,
+  /ER_\w+/,           // MySQL error codes (ER_DUP_ENTRY, ER_NO_SUCH_TABLE, etc.)
+  /at Object\./,      // stack trace lines
+  /\.ts:\d+:\d+/,     // TypeScript source locations
+  /\.js:\d+:\d+/,     // JS source locations
+  /TypeError:/i,
+  /ReferenceError:/i,
+  /SyntaxError:/i,
+  /Cannot read prop/i,
+  /is not a function/i,
+  /undefined is not/i,
+  /null is not/i,
+  /redis/i,
+  /qdrant/i,
+  /bullmq/i,
+];
+
+/**
+ * Converts any internal/technical error into a safe, user-facing string.
+ * Never exposes stack traces, SQL errors, network internals, or service names.
+ */
+export function sanitizeErrorForUser(err: unknown): string {
+  if (isAppError(err)) {
+    switch (err.statusCode) {
+      case 429: return 'Too many requests — please slow down and try again shortly.';
+      case 401: return 'Your session has expired. Please log in again.';
+      case 403: return 'You do not have permission to perform this action.';
+      case 404: return 'The requested data could not be found.';
+      case 503: return 'The service is temporarily unavailable. Please try again in a moment.';
+    }
+  }
+
+  const msg = err instanceof Error ? err.message : String(err);
+
+  if (INTERNAL_ERROR_PATTERNS.some((p) => p.test(msg))) {
+    return 'Unable to retrieve the requested data right now. Please try again.';
+  }
+
+  // Short, non-technical messages can be passed through
+  if (msg.length < 200 && !msg.includes('\n') && !msg.includes('  at ')) {
+    return msg;
+  }
+
+  return 'Unable to complete the analysis. Please try again.';
+}

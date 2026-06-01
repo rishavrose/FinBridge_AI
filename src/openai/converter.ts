@@ -667,7 +667,7 @@ export async function chatWithTools(
 
       const { reply: finalReply, validation } = await validateOrAbstain(reply);
       return {
-        reply: finalReply,
+        reply: finalReply || 'I could not complete the analysis. Please try again.',
         toolCallsExecuted,
         toolCallsTrace,
         messages,
@@ -703,11 +703,18 @@ export async function chatWithTools(
           const resultJson = JSON.stringify(payload);
           return { callId: tc.id, name: tc.function.name, args, result: resultJson, sql: trace.sql };
         } catch (err) {
+          // RULE 10: Never expose raw error text to the model — it may hallucinate
+          // a plausible-sounding answer. Return a structured sentinel so the model
+          // knows to say "live data could not be retrieved" rather than guessing.
+          logger.warn({ tool: tc.function.name, err }, 'Tool execution failed — returning unavailable sentinel');
           return {
             callId: tc.id,
             name: tc.function.name,
             args,
-            result: JSON.stringify({ error: (err as Error).message }),
+            result: JSON.stringify({
+              error: 'TOOL_UNAVAILABLE',
+              message: 'Live data could not be retrieved for this tool. Do not estimate or guess values — tell the user the data is temporarily unavailable.',
+            }),
             sql: undefined,
           };
         }
@@ -754,7 +761,7 @@ export async function chatWithTools(
       reply = validateAndCleanAnalyticsResponse(reply);
       const { reply: finalReply, validation } = await validateOrAbstain(reply);
       return {
-        reply: finalReply,
+        reply: finalReply || 'I could not complete the analysis. Please try again.',
         toolCallsExecuted,
         toolCallsTrace,
         messages,
@@ -779,7 +786,7 @@ export async function chatWithTools(
 
   const { reply: finalReply, validation } = await validateOrAbstain(lastContent);
   return {
-    reply: finalReply,
+    reply: finalReply || 'I could not complete the analysis. Please try again.',
     toolCallsExecuted,
     toolCallsTrace,
     messages,

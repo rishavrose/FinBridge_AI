@@ -65,6 +65,39 @@ import { logger } from '../../utils/logger.js';
 import type { Role } from '../../types/index.js';
 import { emitAiProgress, emitAiToolStart, emitAiToolDone } from '../../realtime/socket.js';
 
+// ─── Heavy-query detection (Rules 4, 5, 11) ──────────────────────────────────
+
+/**
+ * Returns true when a message is likely to produce a slow / large-result query
+ * that should be handled by the background job queue rather than synchronously.
+ *
+ * Criteria:
+ *   - Explicit large-N requests ("last 100", "200 records", "all transactions")
+ *   - Broad date-range analytics ("last 30 days", "this month", "Q1")
+ *   - Heavy aggregation phrases ("response time analytics", "settlement report")
+ *   - Export-style phrases ("export", "download", "full report")
+ */
+function isHeavyQuery(message: string): boolean {
+  const m = message.toLowerCase();
+
+  // Explicit row-count requests ≥ 50
+  if (/\b(last|recent|top|show|get|fetch)\s+(5[0-9]|[6-9]\d|\d{3,})\b/.test(m)) return true;
+  if (/\b(5[0-9]|[6-9]\d|\d{3,})\s+(transactions?|records?|payouts?|settlements?|results?|rows?)\b/.test(m)) return true;
+  if (/\ball\s+(transactions?|payouts?|settlements?|records?)\b/.test(m)) return true;
+
+  // Broad date-range analytics
+  if (/\b(last\s+\d+\s+(days?|weeks?|months?)|this\s+month|this\s+week|this\s+quarter|q[1-4]\b|ytd|year\s+to\s+date)\b/.test(m)) return true;
+
+  // Heavy analytics / report phrases
+  if (/\b(response\s+time\s+analytics?|settlement\s+report|performance\s+report|full\s+report|analytics?\s+report|detailed\s+report)\b/.test(m)) return true;
+  if (/\b(slowest\s+(qr|upi)|qr\s+intents?|slowest\s+transactions?)\b/.test(m)) return true;
+
+  // Export intent
+  if (/\b(export|download|csv|bulk)\b/.test(m)) return true;
+
+  return false;
+}
+
 // ─── Request / Response types ─────────────────────────────────────────────────
 
 interface AiChatBody {
@@ -465,6 +498,35 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         'AI chat: cache HIT — skipping OpenAI',
       );
     } else {
+      // ── Large-query detection (Rules 4, 5, 11) ────────────────────────────
+      // Detect queries that are likely to be heavy (large row counts, broad
+      // aggregations, or slow analytics). These are automatically redirected to
+      // the background queue so the frontend never hangs.
+      if (isHeavyQuery(message)) {
+        logger.info(
+          { userId, conversationId, message: message.slice(0, 120) },
+          'AI chat: heavy query detected — redirecting to background queue',
+        );
+        emitAiProgress({
+          conversationId,
+          stage: 'generating',
+          message: 'This query is processing in the background. You will be notified when it is ready.',
+        });
+        return reply.status(202).send({
+          reply: 'This query is processing in the background. You will be notified when the results are ready.',
+          conversationId,
+          messageId: null,
+          cached: false,
+          cacheSource: 'openai' as const,
+          confidence: null,
+          responseType: 'miss' as const,
+          responseMs: Date.now() - startMs,
+          toolCallsExecuted: 0,
+          toolCallsTrace: [],
+          requiresBackground: true,
+        });
+      }
+
       // ── Cache MISS — call OpenAI + MCP tools ───────────────────────────────
       logger.info({ userId, intent: memoryResult.intentCategory }, 'AI chat: cache MISS — calling OpenAI');
       emitAiProgress({ conversationId, stage: 'generating', message: 'Running AI analysis on live systems...' });
@@ -476,15 +538,37 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
 
-      const chatResult = await chatWithTools({
-        userMessage: message,
-        systemPrompt,
-        conversationHistory: conversationContext,
-        conversationState,
-        recentToolResults,
-        callerId: userId,
-        callerRole,
-        callerName: request.user.name,
+      // RULE 15: 25-second guard — prevent the frontend from hanging
+      // indefinitely on heavy queries. The client already retries via the
+      // background queue (/ai/chat/queue) so timing out here is safe.
+      const SYNC_TIMEOUT_MS = 25_000;
+      const chatResult = await Promise.race([
+        chatWithTools({
+          userMessage: message,
+          systemPrompt,
+          conversationHistory: conversationContext,
+          conversationState,
+          recentToolResults,
+          callerId: userId,
+          callerRole,
+          callerName: request.user.name,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(Object.assign(new Error('QUERY_TIMEOUT'), { statusCode: 503 })),
+            SYNC_TIMEOUT_MS,
+          ),
+        ),
+      ]).catch((err: Error & { statusCode?: number }) => {
+        if (err.message === 'QUERY_TIMEOUT') {
+          logger.warn({ userId, conversationId, message: message.slice(0, 120) },
+            'AI chat: sync timeout — client should retry via background queue');
+          throw Object.assign(
+            new Error('This query is taking longer than expected. Please try again — it will be processed in the background.'),
+            { statusCode: 503 },
+          );
+        }
+        throw err;
       });
 
       reply_text = chatResult.reply;
