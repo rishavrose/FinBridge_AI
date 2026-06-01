@@ -538,11 +538,15 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
 
-      // RULE 15: 25-second guard — prevent the frontend from hanging
-      // indefinitely on heavy queries. The client already retries via the
-      // background queue (/ai/chat/queue) so timing out here is safe.
+      // RULE 15: 25-second guard — prevent the frontend from hanging.
+      // Uses a resolve-based race (never throws) so Fastify's error handler
+      // is not involved; the timeout is handled as a normal reply.
       const SYNC_TIMEOUT_MS = 25_000;
-      const chatResult = await Promise.race([
+      type RaceResult =
+        | { timed_out: false; result: Awaited<ReturnType<typeof chatWithTools>> }
+        | { timed_out: true };
+
+      const raceResult = await Promise.race<RaceResult>([
         chatWithTools({
           userMessage: message,
           systemPrompt,
@@ -552,24 +556,38 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
           callerId: userId,
           callerRole,
           callerName: request.user.name,
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(Object.assign(new Error('QUERY_TIMEOUT'), { statusCode: 503 })),
-            SYNC_TIMEOUT_MS,
-          ),
+        }).then((result) => ({ timed_out: false as const, result })),
+        new Promise<RaceResult>((resolve) =>
+          setTimeout(() => resolve({ timed_out: true }), SYNC_TIMEOUT_MS),
         ),
-      ]).catch((err: Error & { statusCode?: number }) => {
-        if (err.message === 'QUERY_TIMEOUT') {
-          logger.warn({ userId, conversationId, message: message.slice(0, 120) },
-            'AI chat: sync timeout — client should retry via background queue');
-          throw Object.assign(
-            new Error('This query is taking longer than expected. Please try again — it will be processed in the background.'),
-            { statusCode: 503 },
-          );
-        }
-        throw err;
-      });
+      ]);
+
+      if (raceResult.timed_out) {
+        logger.warn(
+          { userId, conversationId, message: message.slice(0, 120) },
+          'AI chat: sync timeout — returning requiresBackground for client to re-queue',
+        );
+        emitAiProgress({
+          conversationId,
+          stage: 'generating',
+          message: 'This query is taking longer than expected. Processing in the background.',
+        });
+        return reply.status(202).send({
+          reply: 'This query is taking longer than expected. Processing in the background — you will be notified when ready.',
+          conversationId,
+          messageId: null,
+          cached: false,
+          cacheSource: 'openai' as const,
+          confidence: null,
+          responseType: 'miss' as const,
+          responseMs: Date.now() - startMs,
+          toolCallsExecuted: 0,
+          toolCallsTrace: [],
+          requiresBackground: true,
+        });
+      }
+
+      const chatResult = raceResult.result;
 
       reply_text = chatResult.reply;
       toolCallsExecuted = chatResult.toolCallsExecuted;

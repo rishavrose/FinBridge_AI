@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   aiChat,
   queueAiChat,
+  getAiJobStatus,
   cancelAiJob,
   editMessage as editMessageApi,
   listConversations,
@@ -481,7 +482,10 @@ export function ChatPage({ token }: ChatPageProps) {
       content: event.reply,
       timestamp: new Date(),
     };
-    setMessages(prev => [...prev, assistantMsg]);
+    // Dedup: Socket.io and the polling fallback may both deliver the same event
+    setMessages(prev =>
+      prev.some(m => m.id === event.messageId) ? prev : [...prev, assistantMsg],
+    );
     setLoading(false);
 
     // Feature 7: show banner if user was away
@@ -559,6 +563,58 @@ export function ChatPage({ token }: ChatPageProps) {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Polling fallback for background jobs — catches missed Socket.io events.
+  // Runs when: (a) tab becomes visible again, or (b) every 5s while loading.
+  // This ensures the response always appears even if the Socket.io delivery
+  // was missed while the tab was backgrounded or the connection briefly dropped.
+  useEffect(() => {
+    if (!loading) return;
+
+    const checkJob = async () => {
+      const jobId = pendingJobIdRef.current;
+      if (!jobId) return;
+      try {
+        const status = await getAiJobStatus(jobId, token);
+        if (status.status === 'COMPLETED' && status.result) {
+          onJobComplete({
+            ts: Date.now(),
+            jobId,
+            conversationId: status.conversationId,
+            messageId: status.result.messageId,
+            reply: status.result.content,
+          });
+        } else if (status.status === 'FAILED') {
+          onJobFailed({
+            ts: Date.now(),
+            jobId,
+            conversationId: status.conversationId,
+            error: status.error ?? 'Processing failed',
+          });
+        } else if (status.status === 'CANCELLED') {
+          pendingJobIdRef.current = null;
+          setLoading(false);
+          endStream();
+          setPendingQuery('');
+        }
+      } catch { /* ignore polling errors — Socket.io is primary delivery */ }
+    };
+
+    // Poll immediately when tab becomes visible (catches missed events)
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void checkJob();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    // Poll every 5s as a heartbeat while waiting
+    const interval = setInterval(() => void checkJob(), 5000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      clearInterval(interval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, token]);
 
   // Feature 7: track page visibility for "completed while away" banner
   useEffect(() => {
@@ -658,6 +714,9 @@ export function ChatPage({ token }: ChatPageProps) {
     } catch (queueErr) {
       // Feature 1 fallback: if the queue endpoint is unavailable, use sync HTTP
       pendingJobIdRef.current = null;
+      // Flag: set to true when we re-queue for background so the finally block
+      // does NOT clear the loading state (the job is still running).
+      let handedOffToBackground = false;
       try {
         const abortCtrl = new AbortController();
         syncAbortRef.current = abortCtrl;
@@ -666,39 +725,39 @@ export function ChatPage({ token }: ChatPageProps) {
           await aiChat(trimmed, token, activeConvId ?? undefined);
 
         // Rule 4/5: server detected a heavy query — silently re-queue it
-        if ((res as { requiresBackground?: boolean }).requiresBackground) {
+        if (res.requiresBackground) {
           const requeued = await queueAiChat(trimmed, token, res.conversationId ?? activeConvId ?? undefined);
           pendingJobIdRef.current = requeued.jobId;
+          handedOffToBackground = true;
           if (!activeConvId) {
             setActiveConvId(requeued.conversationId);
             persistConvId(requeued.conversationId);
             void loadConversations();
           }
-          // Loading stays true — cleared by onJobComplete / onJobFailed
-          return;
-        }
-
-        if (!activeConvId) {
-          setActiveConvId(res.conversationId);
-          persistConvId(res.conversationId);
-          void loadConversations();
+          // Do NOT return here — let finally run but it checks handedOffToBackground
         } else {
-          setConversations(prev =>
-            prev.map(c => c.id === res.conversationId
-              ? { ...c, updated_at: new Date().toISOString() }
-              : c)
-              .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
-          );
-        }
+          if (!activeConvId) {
+            setActiveConvId(res.conversationId);
+            persistConvId(res.conversationId);
+            void loadConversations();
+          } else {
+            setConversations(prev =>
+              prev.map(c => c.id === res.conversationId
+                ? { ...c, updated_at: new Date().toISOString() }
+                : c)
+                .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
+            );
+          }
 
-        const assistantMsg: ChatMessage = {
-          id: randomId(), role: 'assistant', content: res.reply,
-          toolCalls: res.toolCallsTrace?.length
-            ? res.toolCallsTrace
-            : (res.toolsUsed?.map(name => ({ name, args: {} })) ?? undefined),
-          timestamp: new Date(),
-        };
-        setMessages(prev => [...prev, assistantMsg]);
+          const assistantMsg: ChatMessage = {
+            id: randomId(), role: 'assistant', content: res.reply,
+            toolCalls: res.toolCallsTrace?.length
+              ? res.toolCallsTrace
+              : (res.toolsUsed?.map(name => ({ name, args: {} })) ?? undefined),
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, assistantMsg]);
+        }
       } catch (syncErr) {
         if ((syncErr as Error)?.name !== 'AbortError') {
           setMessages(prev => [...prev, {
@@ -709,9 +768,12 @@ export function ChatPage({ token }: ChatPageProps) {
         }
       } finally {
         syncAbortRef.current = null;
-        setLoading(false);
-        endStream();
-        setPendingQuery('');
+        // Only clear loading if we are NOT waiting for a background job
+        if (!handedOffToBackground) {
+          setLoading(false);
+          endStream();
+          setPendingQuery('');
+        }
       }
     }
   };
