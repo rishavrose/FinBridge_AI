@@ -821,6 +821,74 @@ export function ChatPage({ token }: ChatPageProps) {
       {/* ── Main layout ── */}
       <div className="flex flex-1 h-full overflow-hidden">
 
+        {/* ── Desktop conversations sidebar (always visible ≥ md) ── */}
+        <aside className="hidden md:flex w-64 flex-shrink-0 flex-col bg-white border-r border-[#EBEBEB] overflow-hidden">
+          <div className="px-4 pt-5 pb-4 border-b border-[#EBEBEB]">
+            <div className="flex items-center gap-2.5 mb-4">
+              <div className="w-8 h-8 rounded-xl bg-brand flex items-center justify-center shadow-md shadow-brand/25 flex-shrink-0">
+                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-[#1a1a1a] leading-none">FinBridge AI</p>
+                <p className="text-[10px] text-gray-400 mt-0.5">Conversation History</p>
+              </div>
+            </div>
+            <button
+              onClick={startNewChat}
+              className="w-full flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-brand text-white text-sm font-semibold hover:bg-brand/90 transition-all shadow-sm"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              New Chat
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto py-3 px-2">
+            {sidebarLoading && conversations.length === 0 && (
+              <div className="flex justify-center mt-10">
+                <div className="w-5 h-5 border-2 border-gray-200 border-t-brand/50 rounded-full animate-spin" />
+              </div>
+            )}
+            {!sidebarLoading && conversations.length === 0 && (
+              <p className="text-xs text-gray-300 text-center mt-8 px-4 leading-relaxed">
+                No conversations yet.<br />Start a new chat above.
+              </p>
+            )}
+            {conversations.map(conv => (
+              <div
+                key={conv.id}
+                onClick={() => void openConversation(conv.id)}
+                className={`group mb-0.5 px-3 py-2.5 rounded-xl cursor-pointer flex items-start gap-2.5 transition-all
+                  ${activeConvId === conv.id ? 'bg-brand-50 border border-brand/15' : 'hover:bg-[#F5F5F5] border border-transparent'}`}
+              >
+                <svg className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-xs font-medium truncate leading-tight ${activeConvId === conv.id ? 'text-brand' : 'text-[#404040]'}`}>
+                    {conv.title}
+                  </p>
+                  <p className="text-[10px] text-gray-300 mt-0.5">{relativeTime(conv.updated_at)}</p>
+                </div>
+                <button
+                  onClick={e => void handleDelete(e, conv.id)}
+                  disabled={deletingId === conv.id}
+                  title="Delete"
+                  className="opacity-0 group-hover:opacity-100 p-1 rounded-lg text-gray-300 hover:text-red-400 hover:bg-red-50 transition-all flex-shrink-0"
+                >
+                  {deletingId === conv.id
+                    ? <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" /></svg>
+                    : <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  }
+                </button>
+              </div>
+            ))}
+          </div>
+        </aside>
+
         {/* ── Chat Area ── */}
         <div className="flex flex-col flex-1 min-w-0 bg-[#FAFAFA]">
 
