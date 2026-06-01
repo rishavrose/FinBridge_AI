@@ -61,6 +61,7 @@ import {
   getRecentToolResults,
   appendToolResults,
 } from '../../ai/conversation/tool-results.js';
+import { resolveScope, isEmptyRestrictedScope } from '../../auth/scope/resolver.js';
 import { logger } from '../../utils/logger.js';
 import type { Role } from '../../types/index.js';
 import { emitAiProgress, emitAiToolStart, emitAiToolDone } from '../../realtime/socket.js';
@@ -476,6 +477,16 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         });
       }
 
+      // Resolve tenant scope ONCE per request. In RESTRICTED mode an empty
+      // mapping is a hard 403 — we short-circuit before paying for OpenAI.
+      const accessScope = await resolveScope(userId, callerRole);
+      if (isEmptyRestrictedScope(accessScope)) {
+        return reply.status(403).send({
+          error: 'You do not have permission to access that data.',
+          code: 'NO_DATA_SCOPE',
+        });
+      }
+
       const chatResult = await chatWithTools({
         userMessage: message,
         systemPrompt,
@@ -485,6 +496,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         callerId: userId,
         callerRole,
         callerName: request.user.name,
+        accessScope,
       });
 
       reply_text = chatResult.reply;

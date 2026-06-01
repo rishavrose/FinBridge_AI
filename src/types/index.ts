@@ -45,6 +45,28 @@ export interface McpToolContext {
   };
   requestId: string;
   timestamp: Date;
+  /**
+   * Tenant scope for row-level filtering. Set by the route layer before tool
+   * dispatch. `null` for admin or GLOBAL mode (no filter applied).
+   */
+  scope?: AccessScope | null;
+}
+
+/**
+ * Result of resolving the caller's data-scope at request time.
+ * In RESTRICTED mode every business-table query is forced to include
+ *   WHERE <scope_column> IN (mappedUserIds...)
+ * Admins or GLOBAL mode → unrestricted = true and the filter is skipped.
+ */
+export interface AccessScope {
+  /** When true, no filter is injected (admin or GLOBAL mode). */
+  unrestricted: boolean;
+  /** The values to constrain against (e.g. ["12345","56789"]). */
+  mappedUserIds: string[];
+  /** Original auth-user id (for audit / logging). */
+  appUserId: string;
+  /** "RESTRICTED" or "GLOBAL" at resolution time. */
+  mode: 'RESTRICTED' | 'GLOBAL';
 }
 
 export interface McpToolResult {

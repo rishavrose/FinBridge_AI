@@ -17,7 +17,26 @@ import { getOrSet, CacheKeys } from '../cache/manager.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { slugify } from '../utils/helpers.js';
-import type { McpToolDefinition, SchemaSnapshot, TableInfo } from '../types/index.js';
+import type { McpToolDefinition, McpToolContext, SchemaSnapshot, TableInfo } from '../types/index.js';
+import { isEmptyRestrictedScope } from '../auth/scope/resolver.js';
+
+/**
+ * Column-name candidates for a table's tenant-scope column, in priority order.
+ *
+ * The codebase has two conventions: production tables (tbl_payouts) use
+ * `userid`, dev/Docker tables (payouts, transactions) use `user_id`.
+ * We pick the first one that exists on the table; tables with NONE are
+ * considered un-scoped and are not filtered.
+ */
+const SCOPE_COLUMN_CANDIDATES = ['userid', 'user_id', 'merchant_id', 'mid'];
+
+function detectScopeColumn(table: TableInfo): string | null {
+  const colNames = new Set(table.columns.map((c) => c.name));
+  for (const c of SCOPE_COLUMN_CANDIDATES) {
+    if (colNames.has(c)) return c;
+  }
+  return null;
+}
 
 // ─── Table → Tool ─────────────────────────────────────────────────────────────
 
@@ -111,8 +130,9 @@ function tableToToolDefinition(table: TableInfo): McpToolDefinition {
 
 function createTableHandler(table: TableInfo) {
   const allowedColumns = new Set(table.columns.map((c) => c.name));
+  const scopeColumn = detectScopeColumn(table);
 
-  return async (args: Record<string, unknown>) => {
+  return async (args: Record<string, unknown>, ctx?: McpToolContext) => {
     const filters = (args.filters as Record<string, unknown>) ?? {};
     const requestedCols = Array.isArray(args.columns)
       ? (args.columns as string[]).filter((c) => allowedColumns.has(c))
@@ -147,6 +167,29 @@ function createTableHandler(table: TableInfo) {
       }
     }
 
+    // ── Tenant scope enforcement ─────────────────────────────────────────────
+    // Inject a forced WHERE filter when the table has a scope column AND the
+    // caller's scope is RESTRICTED. Admins / GLOBAL mode pass through.
+    // Tables with no scope column are not enforced (per design choice).
+    const scope = ctx?.scope;
+    if (scope && !scope.unrestricted && scopeColumn) {
+      if (isEmptyRestrictedScope(scope)) {
+        const err = new Error('You do not have permission to access that data.');
+        (err as NodeJS.ErrnoException & { statusCode?: number }).statusCode = 403;
+        throw err;
+      }
+      // Strip any caller-supplied filter on the scope column — they don't get
+      // to override their own tenant boundary.
+      for (let i = conditions.length - 1; i >= 0; i--) {
+        if (conditions[i].column === scopeColumn) conditions.splice(i, 1);
+      }
+      if (scope.mappedUserIds.length === 1) {
+        conditions.push({ column: scopeColumn, operator: '=', value: scope.mappedUserIds[0] });
+      } else {
+        conditions.push({ column: scopeColumn, operator: 'IN', value: scope.mappedUserIds });
+      }
+    }
+
     // Aggregation mode — COUNT / SUM / AVG without fetching rows
     const agg = args.aggregate as { count?: boolean; sum?: string; avg?: string } | undefined;
     if (agg && (agg.count || agg.sum || agg.avg)) {
@@ -155,10 +198,20 @@ function createTableHandler(table: TableInfo) {
       if (agg.sum && allowedColumns.has(agg.sum)) selectParts.push(`SUM(\`${agg.sum}\`) AS \`sum_${agg.sum}\``);
       if (agg.avg && allowedColumns.has(agg.avg)) selectParts.push(`AVG(\`${agg.avg}\`) AS \`avg_${agg.avg}\``);
 
-      const whereClause = conditions.length
-        ? 'WHERE ' + conditions.map((c) => `\`${c.column}\` ${c.operator} ?`).join(' AND ')
-        : '';
-      const aggParams = conditions.map((c) => c.value);
+      // Render WHERE — supports IN (used by scope injection with multiple ids).
+      const whereParts: string[] = [];
+      const aggParams: unknown[] = [];
+      for (const c of conditions) {
+        if (c.operator === 'IN' && Array.isArray(c.value)) {
+          const placeholders = c.value.map(() => '?').join(', ');
+          whereParts.push(`\`${c.column}\` IN (${placeholders})`);
+          aggParams.push(...c.value);
+        } else {
+          whereParts.push(`\`${c.column}\` ${c.operator} ?`);
+          aggParams.push(c.value);
+        }
+      }
+      const whereClause = whereParts.length ? 'WHERE ' + whereParts.join(' AND ') : '';
       const aggSql = `SELECT ${selectParts.join(', ')} FROM \`${table.name}\` ${whereClause}`;
       const aggRows = await executeSelect<Record<string, number>>(aggSql, aggParams);
       return { result: aggRows[0] ?? {}, table: table.name, _sql: aggSql, _params: aggParams };
@@ -194,6 +247,7 @@ export async function generateToolsFromSchema(database?: string): Promise<number
 
   let generated = 0;
 
+  let scopedTables = 0;
   for (const table of schema.tables) {
     const definition = tableToToolDefinition(table);
     const handler = createTableHandler(table);
@@ -201,7 +255,13 @@ export async function generateToolsFromSchema(database?: string): Promise<number
     toolRegistry.register(definition, handler);
     registerToolPermission(definition.name, 'readonly');
     generated++;
+    if (detectScopeColumn(table)) scopedTables++;
   }
+
+  logger.info(
+    { database: dbName, scopedTables, totalTables: schema.tables.length },
+    'Scope-aware tables detected (have userid/user_id/merchant_id column)',
+  );
 
   logger.info(
     { database: dbName, toolsGenerated: generated },

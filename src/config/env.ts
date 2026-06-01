@@ -99,6 +99,9 @@ const envSchema = z.object({
   QDRANT_API_KEY: z.string().optional(),
   QDRANT_COLLECTION: z.string().default('finbridge_ai_knowledge'),
 
+  // User Data Scope — tenant isolation mode. RESTRICTED = users must have mappings.
+  AI_SCOPE_MODE: z.enum(['GLOBAL', 'RESTRICTED']).default('GLOBAL'),
+
   // AI Memory / Semantic Cache
   AI_MEMORY_ENABLED: z.string().default('true').transform((v) => v === 'true'),
   AI_MEMORY_SIMILARITY_THRESHOLD: z.string().default('0.85').transform(Number),

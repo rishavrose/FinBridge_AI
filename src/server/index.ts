@@ -42,6 +42,7 @@ import { authRoutes } from './routes/auth.js';
 import { chatHistoryRoutes } from './routes/chat.js';
 import { dbRoutes } from './routes/db.js';
 import { aiChatRoutes } from './routes/ai-chat.js';
+import { adminScopeRoutes } from './routes/admin-scopes.js';
 import { aiJobRoutes } from './routes/ai-jobs.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { alertRoutes } from './routes/alerts.js';
@@ -175,6 +176,7 @@ export async function buildServer() {
   await fastify.register(chatHistoryRoutes);
   await fastify.register(dbRoutes);
   await fastify.register(aiChatRoutes);
+  await fastify.register(adminScopeRoutes);
   await fastify.register(aiJobRoutes);
   await fastify.register(analyticsRoutes);
   await fastify.register(alertRoutes);

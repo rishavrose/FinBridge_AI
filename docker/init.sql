@@ -409,6 +409,28 @@ CREATE TABLE IF NOT EXISTS message_versions (
 
 GRANT INSERT ON finbridge_db.message_versions TO 'finbridge_readonly'@'%';
 
+-- ────────────────────────────────────────────────────────────────────────────
+-- USER DATA SCOPE — multi-tenant row-level access mapping
+--
+-- One app_user (login) → many mapped_user_ids (the value stored in the
+-- business tables' userid / user_id column). Empty mapping in RESTRICTED mode
+-- means the user has no business-data access.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS user_data_scope (
+  id              VARCHAR(36)  NOT NULL PRIMARY KEY,
+  app_user_id     VARCHAR(36)  NOT NULL,
+  mapped_user_id  VARCHAR(64)  NOT NULL,
+  notes           VARCHAR(255) DEFAULT NULL,
+  created_by      VARCHAR(36)  DEFAULT NULL,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_user_mapping (app_user_id, mapped_user_id),
+  INDEX idx_uds_app_user (app_user_id),
+  INDEX idx_uds_mapped   (mapped_user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Per-user tenant scope mappings';
+
+GRANT INSERT, UPDATE, DELETE ON finbridge_db.user_data_scope TO 'finbridge_readonly'@'%';
+FLUSH PRIVILEGES;
+
 INSERT IGNORE INTO bank_health (bank_code, bank_name, status, success_rate_24h, avg_response_ms, total_requests_24h, failed_requests_24h) VALUES
   ('GTB',     'Guaranty Trust Bank',   'operational', 99.87, 312,  45820, 60),
   ('ACCESS',  'Access Bank',           'operational', 98.92, 485,  32100, 353),

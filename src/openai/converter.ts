@@ -11,7 +11,7 @@ import { toolRegistry } from '../mcp/registry.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { v4 as uuidv4 } from 'uuid';
-import type { McpToolContext, OpenAiFunctionDefinition, Role } from '../types/index.js';
+import type { AccessScope, McpToolContext, OpenAiFunctionDefinition, Role } from '../types/index.js';
 import type { ConversationState } from '../ai/conversation/state-engine.js';
 import type { ToolResultEntry } from '../ai/conversation/tool-results.js';
 import { buildToolResultEntry } from '../ai/conversation/tool-results.js';
@@ -245,6 +245,8 @@ export interface ChatWithToolsOptions {
   callerId: string;
   callerRole: Role;
   callerName?: string;
+  /** Tenant scope — forwarded to every MCP tool execution for row-level filtering. */
+  accessScope?: AccessScope | null;
   maxToolRounds?: number;
   /** Force a specific model. If unset, the router picks one. */
   modelOverride?: string;
@@ -505,6 +507,7 @@ export async function chatWithTools(
     callerId,
     callerRole,
     callerName,
+    accessScope = null,
     maxToolRounds = 10,
     modelOverride,
   } = opts;
@@ -548,6 +551,7 @@ export async function chatWithTools(
     caller: { id: callerId, role: effectiveRole, name: callerName },
     requestId,
     timestamp: new Date(),
+    scope: accessScope,
   };
 
   // NVIDIA NIM (and some other providers) reject a second system message
