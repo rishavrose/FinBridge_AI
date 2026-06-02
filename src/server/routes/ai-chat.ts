@@ -541,7 +541,7 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
       // RULE 15: 25-second guard — prevent the frontend from hanging.
       // Uses a resolve-based race (never throws) so Fastify's error handler
       // is not involved; the timeout is handled as a normal reply.
-      const SYNC_TIMEOUT_MS = 25_000;
+      const SYNC_TIMEOUT_MS = 90_000;
       type RaceResult =
         | { timed_out: false; result: Awaited<ReturnType<typeof chatWithTools>> }
         | { timed_out: true };

@@ -316,6 +316,154 @@ function RecordsView({ data }: { data: ParsedRecords }) {
   );
 }
 
+// ─── Lightweight markdown renderer (no external deps) ────────────────────────
+
+function renderInline(text: string): React.ReactNode[] {
+  // Patterns: **bold**, *italic*, `code`, bare URLs
+  const parts: React.ReactNode[] = [];
+  const re = /(\*\*(.+?)\*\*|\*(.+?)\*|`([^`]+)`|(https?:\/\/[^\s)]+))/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    if (m[2] !== undefined) parts.push(<strong key={key++} className="font-semibold text-[#1a1a2e]">{m[2]}</strong>);
+    else if (m[3] !== undefined) parts.push(<em key={key++} className="italic">{m[3]}</em>);
+    else if (m[4] !== undefined) parts.push(<code key={key++} className="font-mono text-[12px] bg-gray-100 text-brand px-1.5 py-0.5 rounded">{m[4]}</code>);
+    else if (m[5] !== undefined) parts.push(<a key={key++} href={m[5]} target="_blank" rel="noopener noreferrer" className="text-brand underline underline-offset-2 hover:text-brand/70">{m[5]}</a>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  const lines = content.split('\n');
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block
+    if (line.trim().startsWith('```')) {
+      const lang = line.trim().slice(3).trim();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      nodes.push(
+        <div key={key++} className="my-3 rounded-xl overflow-hidden border border-gray-100 shadow-sm">
+          {lang && (
+            <div className="px-3 py-1.5 bg-gray-50 border-b border-gray-100 text-[10px] font-mono font-semibold text-gray-400 uppercase tracking-wider">
+              {lang}
+            </div>
+          )}
+          <pre className="bg-[#1a1a2e] text-emerald-300 font-mono text-[12px] px-4 py-3 overflow-x-auto leading-relaxed whitespace-pre">
+            {codeLines.join('\n')}
+          </pre>
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // H1 / H2 / H3
+    const hMatch = line.match(/^(#{1,3})\s+(.+)/);
+    if (hMatch) {
+      const level = hMatch[1].length;
+      const cls = level === 1
+        ? 'text-base font-bold text-[#1a1a2e] mt-4 mb-1.5'
+        : level === 2
+          ? 'text-sm font-bold text-[#1a1a2e] mt-3 mb-1'
+          : 'text-sm font-semibold text-[#404040] mt-2 mb-0.5';
+      nodes.push(<p key={key++} className={cls}>{renderInline(hMatch[2])}</p>);
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^[-*_]{3,}$/.test(line.trim())) {
+      nodes.push(<hr key={key++} className="my-3 border-gray-100" />);
+      i++;
+      continue;
+    }
+
+    // Unordered list — collect consecutive list items
+    if (/^[-*+]\s/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^[-*+]\s/.test(lines[i])) {
+        items.push(lines[i].replace(/^[-*+]\s+/, ''));
+        i++;
+      }
+      nodes.push(
+        <ul key={key++} className="my-2 space-y-1.5 pl-1">
+          {items.map((item, idx) => (
+            <li key={idx} className="flex items-start gap-2 text-sm text-[#404040] leading-relaxed">
+              <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-brand/50 flex-shrink-0" />
+              <span>{renderInline(item)}</span>
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // Ordered list — collect consecutive numbered items
+    if (/^\d+\.\s/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s+/, ''));
+        i++;
+      }
+      nodes.push(
+        <ol key={key++} className="my-2 space-y-1.5 pl-1">
+          {items.map((item, idx) => (
+            <li key={idx} className="flex items-start gap-2.5 text-sm text-[#404040] leading-relaxed">
+              <span className="mt-0.5 w-5 h-5 rounded-full bg-brand/10 text-brand text-[10px] font-bold flex items-center justify-center flex-shrink-0">
+                {idx + 1}
+              </span>
+              <span>{renderInline(item)}</span>
+            </li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    // Blockquote
+    if (line.startsWith('> ')) {
+      const text = line.slice(2);
+      nodes.push(
+        <blockquote key={key++} className="my-2 pl-3 border-l-2 border-brand/30 text-sm text-gray-500 italic leading-relaxed">
+          {renderInline(text)}
+        </blockquote>
+      );
+      i++;
+      continue;
+    }
+
+    // Blank line — skip
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+
+    // Plain paragraph
+    nodes.push(
+      <p key={key++} className="text-sm leading-relaxed text-[#404040] mb-1">
+        {renderInline(line)}
+      </p>
+    );
+    i++;
+  }
+
+  return <div className="space-y-0.5">{nodes}</div>;
+}
+
 function MessageContent({ content }: { content: string }) {
   const records = tryParseRecords(content);
   if (records) return <RecordsView data={records} />;
@@ -327,7 +475,7 @@ function MessageContent({ content }: { content: string }) {
       </div>
     );
   }
-  return <p className="text-sm leading-relaxed whitespace-pre-wrap text-[#404040]">{content}</p>;
+  return <MarkdownContent content={content} />;
 }
 
 // ─── Processing animation card (shown in chat bubble while loading) ───────────
@@ -725,13 +873,23 @@ export function ChatPage({ token }: ChatPageProps) {
 
         // Rule 4/5: server detected a heavy query — silently re-queue it
         if (res.requiresBackground) {
-          const requeued = await queueAiChat(trimmed, token, res.conversationId ?? activeConvId ?? undefined);
-          pendingJobIdRef.current = requeued.jobId;
-          handedOffToBackground = true;
-          if (!activeConvId) {
-            setActiveConvId(requeued.conversationId);
-            persistConvId(requeued.conversationId);
-            void loadConversations();
+          try {
+            const requeued = await queueAiChat(trimmed, token, res.conversationId ?? activeConvId ?? undefined);
+            pendingJobIdRef.current = requeued.jobId;
+            handedOffToBackground = true;
+            if (!activeConvId) {
+              setActiveConvId(requeued.conversationId);
+              persistConvId(requeued.conversationId);
+              void loadConversations();
+            }
+          } catch {
+            // Background queue unavailable — surface a helpful message so the
+            // user knows to retry rather than waiting indefinitely.
+            setMessages(prev => [...prev, {
+              id: randomId(), role: 'assistant',
+              content: 'This query took longer than expected and the background queue is currently unavailable. Please try again — shorter or more specific questions tend to respond faster.',
+              timestamp: new Date(),
+            }]);
           }
           // Do NOT return here — let finally run but it checks handedOffToBackground
         } else {
@@ -916,30 +1074,21 @@ export function ChatPage({ token }: ChatPageProps) {
       <div className="flex flex-1 h-full overflow-hidden">
 
         {/* ── Desktop conversations sidebar (always visible ≥ md) ── */}
-        <aside className="hidden md:flex w-64 flex-shrink-0 flex-col bg-white border-r border-[#EBEBEB] overflow-hidden">
-          <div className="px-4 pt-5 pb-4 border-b border-[#EBEBEB]">
-            <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-8 h-8 rounded-xl bg-brand flex items-center justify-center shadow-md shadow-brand/25 flex-shrink-0">
-                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-[#1a1a1a] leading-none">FinBridge AI</p>
-                <p className="text-[10px] text-gray-400 mt-0.5">Conversation History</p>
-              </div>
-            </div>
+        <aside className="hidden md:flex w-56 flex-shrink-0 flex-col bg-white border-r border-[#EBEBEB] overflow-hidden">
+          <div className="px-3 pt-4 pb-3 border-b border-[#EBEBEB] flex items-center justify-between">
+            <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest px-1">Chats</p>
             <button
               onClick={startNewChat}
-              className="w-full flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-brand text-white text-sm font-semibold hover:bg-brand/90 transition-all shadow-sm"
+              title="New chat"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-brand text-white text-xs font-semibold hover:bg-brand/90 transition-all"
             >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
               </svg>
-              New Chat
+              New
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto py-3 px-2">
+          <div className="flex-1 overflow-y-auto py-2 px-2">
             {sidebarLoading && conversations.length === 0 && (
               <div className="flex justify-center mt-10">
                 <div className="w-5 h-5 border-2 border-gray-200 border-t-brand/50 rounded-full animate-spin" />
@@ -947,7 +1096,7 @@ export function ChatPage({ token }: ChatPageProps) {
             )}
             {!sidebarLoading && conversations.length === 0 && (
               <p className="text-xs text-gray-300 text-center mt-8 px-4 leading-relaxed">
-                No conversations yet.<br />Start a new chat above.
+                No conversations yet.<br />Start a new chat to begin.
               </p>
             )}
             {conversations.map(conv => (

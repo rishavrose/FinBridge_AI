@@ -29,6 +29,7 @@ const SAFE_CLIENT_ERROR_CODES = new Set([
   'NOT_FOUND',
   'OPENAI_NOT_CONFIGURED',
   'AI_DISABLED',
+  'QUEUE_UNAVAILABLE',
 ]);
 
 async function apiFetch<T>(

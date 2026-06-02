@@ -188,10 +188,22 @@ export async function aiJobRoutes(fastify: FastifyInstance): Promise<void> {
       systemPrompt,
     };
 
-    await aiProcessingQueue.add('process', jobData, {
-      jobId,            // BullMQ job ID matches our DB record ID
-      priority: 1,
-    });
+    try {
+      await aiProcessingQueue.add('process', jobData, {
+        jobId,            // BullMQ job ID matches our DB record ID
+        priority: 1,
+      });
+    } catch (queueErr) {
+      logger.error({ err: queueErr, jobId }, 'Failed to enqueue AI job — Redis/BullMQ unavailable');
+      await executeWrite(
+        "UPDATE ai_jobs SET status = 'FAILED', error_message = 'Queue unavailable' WHERE id = ?",
+        [jobId],
+      ).catch(() => {});
+      return reply.status(503).send({
+        error: 'Background processing queue is currently unavailable. Please try again.',
+        code: 'QUEUE_UNAVAILABLE',
+      });
+    }
 
     logger.info(
       { jobId, conversationId, userId },
