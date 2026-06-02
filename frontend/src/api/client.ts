@@ -254,6 +254,7 @@ export async function aiChat(
     modelUsed: res.modelUsed,
     grounded: res.grounded,
     ungroundedFacts: res.ungroundedFacts,
+    requiresBackground: res.requiresBackground,
   };
 }
 

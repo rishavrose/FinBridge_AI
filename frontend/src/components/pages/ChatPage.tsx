@@ -721,8 +721,7 @@ export function ChatPage({ token }: ChatPageProps) {
         const abortCtrl = new AbortController();
         syncAbortRef.current = abortCtrl;
 
-        const res: AiChatResponse & { requiresBackground?: boolean } =
-          await aiChat(trimmed, token, activeConvId ?? undefined);
+        const res = await aiChat(trimmed, token, activeConvId ?? undefined);
 
         // Rule 4/5: server detected a heavy query — silently re-queue it
         if (res.requiresBackground) {

@@ -69,6 +69,7 @@ export interface AiChatResponse {
   /** True when every numeric/ID fact in the reply was traceable to a tool result. */
   grounded?: boolean;
   ungroundedFacts?: Array<{ kind: string; value: string }>;
+  requiresBackground?: boolean;
 }
 
 // ─── Chat History ─────────────────────────────────────────────────────────────
@@ -203,6 +204,7 @@ export interface AiMemoryChatResponse {
   modelUsed?: string;
   grounded?: boolean;
   ungroundedFacts?: Array<{ kind: string; value: string }>;
+  requiresBackground?: boolean;
 }
 
 /** Response from GET /ai/chat/stats */
