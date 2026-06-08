@@ -546,21 +546,52 @@ export async function aiChatRoutes(fastify: FastifyInstance): Promise<void> {
         | { timed_out: false; result: Awaited<ReturnType<typeof chatWithTools>> }
         | { timed_out: true };
 
-      const raceResult = await Promise.race<RaceResult>([
-        chatWithTools({
-          userMessage: message,
-          systemPrompt,
-          conversationHistory: conversationContext,
-          conversationState,
-          recentToolResults,
-          callerId: userId,
-          callerRole,
-          callerName: request.user.name,
-        }).then((result) => ({ timed_out: false as const, result })),
-        new Promise<RaceResult>((resolve) =>
-          setTimeout(() => resolve({ timed_out: true }), SYNC_TIMEOUT_MS),
-        ),
-      ]);
+      let raceResult: RaceResult;
+      try {
+        raceResult = await Promise.race<RaceResult>([
+          chatWithTools({
+            userMessage: message,
+            systemPrompt,
+            conversationHistory: conversationContext,
+            conversationState,
+            recentToolResults,
+            callerId: userId,
+            callerRole,
+            callerName: request.user.name,
+          }).then((result) => ({ timed_out: false as const, result })),
+          new Promise<RaceResult>((resolve) =>
+            setTimeout(() => resolve({ timed_out: true }), SYNC_TIMEOUT_MS),
+          ),
+        ]);
+      } catch (err) {
+        logger.error({ err, userId, conversationId }, 'AI chat: chatWithTools threw — returning 503');
+        emitAiProgress({ conversationId, stage: 'complete', message: 'AI service error.' });
+
+        // Surface a safe subset of the provider error so callers can diagnose
+        // issues (wrong model name, quota exceeded, invalid API key, etc.)
+        // without leaking internal stack traces.
+        let providerHint = '';
+        if (err instanceof Error) {
+          const msg = err.message ?? '';
+          // OpenAI / NVIDIA SDK wraps the HTTP status + body in the message
+          if (msg.includes('401') || msg.toLowerCase().includes('invalid api key') || msg.toLowerCase().includes('authentication')) {
+            providerHint = ' (API key invalid or expired)';
+          } else if (msg.includes('429') || msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('quota')) {
+            providerHint = ' (API rate limit or quota exceeded)';
+          } else if (msg.includes('404') || msg.toLowerCase().includes('model not found') || msg.toLowerCase().includes('no such model')) {
+            providerHint = ' (model not found — check NVIDIA_MODEL in .env)';
+          } else if (msg.includes('503') || msg.toLowerCase().includes('overloaded') || msg.toLowerCase().includes('unavailable')) {
+            providerHint = ' (AI provider is overloaded — try again shortly)';
+          } else if (msg.length > 0 && msg.length < 200) {
+            providerHint = ` (${msg})`;
+          }
+        }
+
+        return reply.status(503).send({
+          error: `AI service is temporarily unavailable${providerHint}. Please try again in a moment.`,
+          code: 'AI_SERVICE_ERROR',
+        });
+      }
 
       if (raceResult.timed_out) {
         logger.warn(

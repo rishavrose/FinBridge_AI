@@ -118,7 +118,16 @@ export async function dbRoutes(fastify: FastifyInstance): Promise<void> {
     }
 
     // 2. Store encrypted credentials
-    const credential = await storeConnection(parsed.data, request.user.id);
+    let credential;
+    try {
+      credential = await storeConnection(parsed.data, request.user.id);
+    } catch (err) {
+      logger.error({ err }, 'storeConnection failed — cannot persist DB credentials');
+      return reply.status(503).send({
+        error: 'Could not securely store the connection. The credential encryption key is missing or misconfigured on the server.',
+        code: 'CREDENTIAL_STORE_FAILED',
+      });
+    }
 
     // 3. Scan schema + generate tools (only selected tables if specified)
     let toolSummary;

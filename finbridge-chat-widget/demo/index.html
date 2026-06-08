@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FinBridge Chat Widget — Live Demo</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0;
+           background: linear-gradient(135deg, #fff5f5, #f7f8fb); color: #1f2533; min-height: 100vh; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 56px 24px 220px; }
+    h1 { font-size: 32px; margin: 0 0 8px; }
+    h2 { font-size: 20px; margin: 32px 0 8px; }
+    p.lead { color: #4b5563; font-size: 18px; margin-top: 0; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 18px; border-radius: 12px; overflow-x: auto;
+          font-size: 13px; line-height: 1.6; }
+    code.inline { background: #fdeaea; padding: 2px 6px; border-radius: 5px; font-size: 14px; }
+    .card { background: #fff; border: 1px solid #ecdede; border-radius: 14px; padding: 20px; margin: 18px 0;
+            box-shadow: 0 6px 24px rgba(120,20,20,.05); }
+    label { display:block; font-weight:600; margin: 12px 0 4px; font-size: 14px; }
+    input { width: 100%; padding: 10px 12px; border: 1px solid #e0d3d3; border-radius: 8px; font-size: 14px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .row { display:flex; gap: 8px; align-items:center; flex-wrap: wrap; margin-top: 6px; }
+    .seg { display:inline-flex; border:1px solid #e0d3d3; border-radius: 10px; overflow:hidden; margin: 6px 0 2px; }
+    .seg button { border:none; background:#fff; padding:8px 14px; cursor:pointer; font-size:13px; font-weight:600; color:#6b7280; }
+    .seg button.active { background:#dc2626; color:#fff; }
+    button.primary { margin-top: 16px; background: #dc2626; color:#fff; border:none; padding:11px 20px;
+                     border-radius: 9px; font-weight:700; cursor:pointer; font-size:14px; }
+    button.primary:hover { background:#b91c1c; }
+    .status { margin-top:14px; font-size:14px; font-weight:600; }
+    .status.ok { color:#15803d; } .status.err { color:#b42318; } .status.pending { color:#9a6700; }
+    .hide { display:none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>FinBridge Chat Widget — Live Demo</h1>
+    <p class="lead">This page is wired to a <strong>real</strong> FinBridge backend. Connect below, then
+      use the red <strong>Ask FinBridge</strong> launcher in the bottom-right corner. 👉</p>
+
+    <div class="card">
+      <strong>Connect to your backend</strong>
+      <label for="api">API URL</label>
+      <input id="api" value="http://localhost:3000" />
+
+      <div class="row">
+        <div class="seg" id="modeSeg">
+          <button data-mode="bootstrap" class="active">Quick dev token</button>
+          <button data-mode="login">Username / password</button>
+          <button data-mode="token">Paste token</button>
+        </div>
+      </div>
+
+      <!-- Bootstrap mode: mints a token via /auth/token using the dev BOOTSTRAP_SECRET -->
+      <div id="m-bootstrap">
+        <label for="secret">Bootstrap secret <span style="font-weight:400;color:#9a6770">(dev only — from your .env)</span></label>
+        <input id="secret" value="finbridge_dev_bootstrap" />
+      </div>
+
+      <!-- Login mode: real /auth/login -->
+      <div id="m-login" class="hide">
+        <div class="grid2">
+          <div><label for="user">Username</label><input id="user" placeholder="admin" /></div>
+          <div><label for="pass">Password</label><input id="pass" type="password" placeholder="••••••••" /></div>
+        </div>
+      </div>
+
+      <!-- Token mode: paste a JWT directly -->
+      <div id="m-token" class="hide">
+        <label for="tok">Bearer token (JWT)</label>
+        <input id="tok" placeholder="eyJhbGciOi..." />
+      </div>
+
+      <button class="primary" id="connectBtn">Connect &amp; open chat</button>
+      <div class="status pending" id="status">Not connected yet.</div>
+    </div>
+
+    <h2>The entire embed code</h2>
+    <pre>&lt;script&gt;
+  window.FinBridgeChatConfig = {
+    apiUrl: "https://your-finbridge-host.com",
+    token:  "YOUR_BEARER_TOKEN",        // or getToken / tokenUrl
+    title:  "FinBridge",
+    launcherLabel: "Ask FinBridge",
+    primaryColor: "#dc2626",
+    suggestions: [
+      "Accept Payments",
+      "Make Payouts",
+      "How do I integrate?"
+    ]
+  };
+&lt;/script&gt;
+&lt;script src="https://your-cdn.com/finbridge-widget.js" async&gt;&lt;/script&gt;</pre>
+    <p>Two tags on any page, any framework, no build step.</p>
+  </div>
+
+  <!-- ── Widget bundle (built one directory up) ─────────────────────────────── -->
+  <script src="../dist/finbridge-widget.js"></script>
+  <script>
+    // Shared branding used every time we (re)initialise the widget.
+    const BRANDING = {
+      title: "FinBridge",
+      subtitle: "Looking for something? Let me help you!",
+      launcherLabel: "Ask FinBridge",
+      primaryColor: "#dc2626",
+      welcomeMessage: "Hi, welcome to FinBridge! 👋 I'm FinBridge AI. How can I help you today?",
+      suggestions: [
+        "What can you help me with?",
+        "Accept Payments",
+        "Make Payouts",
+        "How do I integrate?"
+      ]
+    };
+
+    // ── Connect form wiring ────────────────────────────────────────────────
+    let mode = "bootstrap";
+    const $ = (id) => document.getElementById(id);
+    const setStatus = (msg, kind) => { const s = $("status"); s.textContent = msg; s.className = "status " + kind; };
+
+    $("modeSeg").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      mode = btn.dataset.mode;
+      [...$("modeSeg").children].forEach(b => b.classList.toggle("active", b === btn));
+      ["bootstrap", "login", "token"].forEach(m => $("m-" + m).classList.toggle("hide", m !== mode));
+    });
+
+    /** Obtain a real bearer token from the live backend, per selected mode. */
+    async function obtainToken(apiUrl) {
+      if (mode === "token") {
+        const t = $("tok").value.trim();
+        if (!t) throw new Error("Paste a token first.");
+        return t;
+      }
+      if (mode === "login") {
+        const res = await fetch(apiUrl + "/auth/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: $("user").value.trim(), password: $("pass").value })
+        });
+        if (!res.ok) throw new Error("Login failed (" + res.status + "). Check username/password.");
+        return (await res.json()).token;
+      }
+      // bootstrap
+      const res = await fetch(apiUrl + "/auth/token", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: "demo-user", role: "admin", name: "Demo", secret: $("secret").value.trim() })
+      });
+      if (!res.ok) throw new Error("Token mint failed (" + res.status + "). Check the bootstrap secret.");
+      return (await res.json()).token;
+    }
+
+    async function connect(autoOpen) {
+      const apiUrl = $("api").value.trim().replace(/\/+$/, "");
+      setStatus("Connecting…", "pending");
+      try {
+        const token = await obtainToken(apiUrl);
+        if (!token) throw new Error("No token returned.");
+        // Init the REAL widget against the REAL backend. getToken lets it reuse
+        // the same token for every message.
+        window.FinBridgeChat.init({
+          ...BRANDING,
+          apiUrl,
+          getToken: () => token,
+          autoOpen: !!autoOpen
+        });
+        setStatus("✓ Connected to " + apiUrl + " — chat is live.", "ok");
+      } catch (err) {
+        setStatus("✗ " + (err.message || "Connection failed."), "err");
+      }
+    }
+
+    $("connectBtn").addEventListener("click", () => connect(true));
+
+    // Auto-connect on load so the demo "just runs" against localhost:3000.
+    window.addEventListener("DOMContentLoaded", () => connect(false));
+  </script>
+</body>
+</html>

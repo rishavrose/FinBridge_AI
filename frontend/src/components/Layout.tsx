@@ -102,6 +102,19 @@ export function Layout({ claims, activePage, onNavigate, onLogout, children }: L
       title: 'ADMIN',
       items: [
         {
+          id: 'db',
+          label: 'Database',
+          adminOnly: true,
+          icon: (
+            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M4 7c0 1.657 3.582 3 8 3s8-1.343 8-3-3.582-3-8-3-8 1.343-8 3z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M4 7v5c0 1.657 3.582 3 8 3s8-1.343 8-3V7M4 12v5c0 1.657 3.582 3 8 3s8-1.343 8-3v-5" />
+            </svg>
+          ),
+        },
+        {
           id: 'mcp',
           label: 'MCP Console',
           adminOnly: true,

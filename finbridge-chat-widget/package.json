@@ -1,0 +1,29 @@
+{
+  "name": "finbridge-chat-widget",
+  "version": "1.0.0",
+  "description": "Plug-and-play embeddable AI chat widget (RAY-style) for the FinBridge AI backend. Drop one <script> tag into any website.",
+  "type": "module",
+  "main": "dist/finbridge-widget.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "dev": "node build.mjs --serve",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "chat",
+    "widget",
+    "embeddable",
+    "chatbot",
+    "finbridge"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.23.1",
+    "typescript": "^5.5.4"
+  }
+}
